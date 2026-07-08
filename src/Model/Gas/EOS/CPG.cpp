@@ -5,19 +5,24 @@ namespace Model {
 namespace Gas {
 namespace EOS {
 
+// Regularization to guard against division by (near-)zero density at
+// solid-boundary-adjacent cells; matches the default Hydro::small used
+// throughout the rest of the diffuse-interface solver.
+static constexpr double small = 1E-8;
+
 double CPG::ComputeT(double density, double momentumx, double momentumy, double E, double Tguess,
                 Set::Patch<const Set::Scalar>& X, int i, int j, int k, double /*rtol=1e-12*/) const {
     // Temperature, K
     // Since gamma is not a function of temperature, but is a function of composition, we can
     // compute gamma at any dummy temperature
-    double P = (E - 0.5*(momentumx*momentumx + momentumy*momentumy)/density) * (gas->gamma(Tguess, X, i, j, k) - 1.0);
-    double T = P / density / gas->R(X, i, j, k);
+    double P = (E - 0.5*(momentumx*momentumx + momentumy*momentumy)/(density + small)) * (gas->gamma(Tguess, X, i, j, k) - 1.0);
+    double T = P / (density + small) / gas->R(X, i, j, k);
     return T;
 }
 double CPG::ComputeT(double pressure, double density,
                 Set::Patch<const Set::Scalar>& X, int i, int j, int k) const {
     // Temperature, K
-    double T = pressure / density / gas->R(X, i, j, k);
+    double T = pressure / (density + small) / gas->R(X, i, j, k);
     return T;
 }
 double CPG::ComputeP(double density, double T,
@@ -31,7 +36,7 @@ double CPG::ComputeE(double density, double momentumx, double momentumy, double 
     // Energy, J/m^3
     double P = density * gas->R(X, i, j, k) * T;
     double rhoE = P / (gas->gamma(T, X, i, j, k) - 1.0);
-    double E = rhoE + 0.5*(momentumx*momentumx + momentumy*momentumy)/density;
+    double E = rhoE + 0.5*(momentumx*momentumx + momentumy*momentumy)/(density + small);
     return E;
 }
 

@@ -20,7 +20,7 @@ system.time = s
 
 # AMR and output parameters
 amr.plot_dt = 0.0005_s
-# amr.plot_int = 40 
+# amr.plot_int = 1
 amr.max_grid_size = 16
 amr.blocking_factor = 4
 amr.base_regrid_int = 10
@@ -43,7 +43,7 @@ geometry.is_periodic = 0 0 0
 
 ## Timestep
 timestep = 1e-6_s # 0.00005 # [s]
-stop_time = 1000e-5_s
+stop_time = 30000e-6_s
 
 small = 1.0e-8
 pf.eps = 1.0_um #0.0005 # [m]
@@ -223,7 +223,7 @@ hydro.solid.momentum.ic.expression.region0 = "0.0"
 hydro.solid.momentum.ic.expression.region1 = "0.0"
 
 hydro.solid.energy.ic.type = expression
-hydro.solid.energy.ic.expression.region0 = "0.0"
+hydro.solid.energy.ic.expression.region0 = "5.0"
 
 ### HYDRO BC ###
 

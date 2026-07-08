@@ -443,20 +443,21 @@ void Flame::UpdateFluxes(int lev, Set::Scalar a_time, Set::Scalar dt)
             rho_AP_gas(i,j,k) = pressure(i,j,k)*M_AP/(R*temp_gas); // Density of AP gaseous products assuming ideal gas
             rho_HTPB_gas(i,j,k) = pressure(i,j,k)*M_HTPB/(R*temp_gas); // Density of HTPB gaseous products assuming ideal gas
             rho_tot_gas(i,j,k) = rho_AP_gas(i,j,k)*phi + rho_HTPB_gas(i,j,k)*(1.0 - phi); // Find the average density of the fluid based on the solid species
+            Set::Scalar deta_dt = (eta_hydro - etaold_hydro)/(dt); // time derivate approximation of eta
 
-            m0(i,j,k) = hydro.rho_ap*phi + hydro.rho_htpb*(1.0 - phi); // example of setting value to m0
-            // m0(i,j,k) = 0.0;
+            // m0(i,j,k) = (hydro.rho_ap*phi + hydro.rho_htpb*(1.0 - phi))*deta_dt*0.1; // example of setting value to m0
+            m0(i,j,k) = 0.0;
             solidrho(i,j,k) = hydro.rho_ap*phi + hydro.rho_htpb*(1.0 - phi); // Physical solid-phase density used by Hydro::Mix, distinct from the m0 mass-flux source
 
             Set::Vector u0;
-            u0(0) = hydro.u0_ap*phi + hydro.u0_htpb*(1.0 - phi);
-            // u0(0) = 0.0;
+            // u0(0) = hydro.u0_ap*phi + hydro.u0_htpb*(1.0 - phi)*deta_dt*0.1;
+            // u0(1) = 0.0;
+
             u0(0) = 0.0;
+            u0(1) = 0.0;
             #if AMREX_SPACEDIM == 3
                 u0(2) = 0.0;   // Might not be physcially accurate, need to find how to extend to 3 dimensions
             #endif
-
-            Set::Scalar deta_dt = (eta_hydro - etaold_hydro)/(dt); // time derivate approximation of eta
 
             if (Hydro::prescribedflowmode == Hydro::PrescribedFlowMode::Relative)
             {
@@ -481,11 +482,11 @@ void Flame::UpdateFluxes(int lev, Set::Scalar a_time, Set::Scalar dt)
         #if AMREX_SPACEDIM == 3
         solidM(i,j,k,2) = solidrho(i,j,k)*u0(2);
         #endif
-            // u0_patch(i,j,k,0) = 0.0;
-            // u0_patch(i,j,k,1) = 0.0;
-
-            u0_patch(i,j,k,0) = hydro.u0_ap*phi + hydro.u0_htpb*(1.0 - phi);
+            u0_patch(i,j,k,0) = 0.0;
             u0_patch(i,j,k,1) = 0.0;
+
+            // u0_patch(i,j,k,0) = (hydro.u0_ap*phi + hydro.u0_htpb*(1.0 - phi))*deta_dt*0.1;
+            // u0_patch(i,j,k,1) = 0.0;
 
             // u0_patch(i,j,k,0) = deta_dt*(hydro.rho_ap*phi + hydro.rho_htpb*(1-phi))*N(0)*rho_tot_gas(i,j,k)*velocity_mult; // Update the velocity source term based on conservation of mass
             // u0_patch(i,j,k,1) = deta_dt*(hydro.rho_ap*phi + hydro.rho_htpb*(1-phi))*N(1)*rho_tot_gas(i,j,k)*velocity_mult;

@@ -88,7 +88,6 @@ protected:
 
     Set::Field<Set::Scalar> density_mf;
     Set::Field<Set::Scalar> density_old_mf;
-    Set::Field<Set::Scalar> fluid_density_mf;
 
     Set::Field<Set::Scalar> energy_mf;
     Set::Field<Set::Scalar> energy_old_mf;
