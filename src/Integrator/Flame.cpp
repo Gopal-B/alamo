@@ -418,16 +418,18 @@ void Flame::UpdateFluxes(int lev, Set::Scalar a_time, Set::Scalar dt)
         Real M_AP = 27.645; // Molar mass of mixture after AP undergos pyrolysis (kg/mol)
         Real M_HTPB = 28.0532; // Molar mass of Ethylene, main product of HTPB pyrolysis
         Real R = 8314; // Ideal gas constant (J/kmol-k)
-        Real Pref = Hydro::pref; // Find the reference temperature from Hydro
         Real temp_gas = 750; // Set value for temperature of gas phase, this is just an approximation (K)
 
-        Real rho_AP_solid = 1950; // kg/m^3 https://en.wikipedia.org/wiki/Ammonium_perchlorate
-        Real rho_HTPB_solid = 920; // kg/m^3 https://www.researchgate.net/publication/279252447_Pocket_Model_for_Aluminum_Agglomeration_Based_on_Propellant_Microstructure
+        // Real rho_AP_solid = 1950; // kg/m^3 https://en.wikipedia.org/wiki/Ammonium_perchlorate
+        // Real rho_HTPB_solid = 920; // kg/m^3 https://www.researchgate.net/publication/279252447_Pocket_Model_for_Aluminum_Agglomeration_Based_on_Propellant_Microstructure
+
+        Real rho_AP_solid = 5;
+        Real rho_HTPB_solid = 20;
 
         Set::Patch<Set::Scalar> solidrho  = Hydro::solid.density_mf.Patch(lev,mfi);
         Set::Patch<Set::Scalar> solidM    = Hydro::solid.momentum_mf.Patch(lev,mfi);
         Set::Patch<Set::Scalar> m0        = Hydro::m0_mf.Patch(lev,mfi);
-        Set::Patch<Set::Scalar> u0_patch  = Hydro::u0_mf.Patch(lev,mfi);
+        Set::Patch<Set::Scalar> u0_patch = Hydro::u0_mf.Patch(lev,mfi);
 
         amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k)
         {   
@@ -438,17 +440,18 @@ void Flame::UpdateFluxes(int lev, Set::Scalar a_time, Set::Scalar dt)
             Set::Vector grad_eta_hydro = -2.0 * eta(i,j,k) * grad_eta;
             Set::Scalar grad_eta_mag = grad_eta.lpNorm<2>();
             Set::Vector N = grad_eta_hydro / (grad_eta_mag + small); // Example of finding the normal vector
-            pressure(i,j,k) = pressure(i,j,k) + Pref; // Scale by the reference pressure b/c ideal gas law requires absolute pressure
             rho_AP_gas(i,j,k) = pressure(i,j,k)*M_AP/(R*temp_gas); // Density of AP gaseous products assuming ideal gas
             rho_HTPB_gas(i,j,k) = pressure(i,j,k)*M_HTPB/(R*temp_gas); // Density of HTPB gaseous products assuming ideal gas
             rho_tot_gas(i,j,k) = rho_AP_gas(i,j,k)*phi + rho_HTPB_gas(i,j,k)*(1.0 - phi); // Find the average density of the fluid based on the solid species
 
             m0(i,j,k) = hydro.rho_ap*phi + hydro.rho_htpb*(1.0 - phi); // example of setting value to m0
-            solidrho(i,j,k) = m0(i,j,k);
+            // m0(i,j,k) = 0.0;
+            solidrho(i,j,k) = hydro.rho_ap*phi + hydro.rho_htpb*(1.0 - phi); // Physical solid-phase density used by Hydro::Mix, distinct from the m0 mass-flux source
 
-                Set::Vector u0;
+            Set::Vector u0;
             u0(0) = hydro.u0_ap*phi + hydro.u0_htpb*(1.0 - phi);
-            u0(1) = 0.0; 
+            // u0(0) = 0.0;
+            u0(0) = 0.0;
             #if AMREX_SPACEDIM == 3
                 u0(2) = 0.0;   // Might not be physcially accurate, need to find how to extend to 3 dimensions
             #endif
@@ -478,9 +481,14 @@ void Flame::UpdateFluxes(int lev, Set::Scalar a_time, Set::Scalar dt)
         #if AMREX_SPACEDIM == 3
         solidM(i,j,k,2) = solidrho(i,j,k)*u0(2);
         #endif
+            // u0_patch(i,j,k,0) = 0.0;
+            // u0_patch(i,j,k,1) = 0.0;
 
-            u0_patch(i,j,k,0) = deta_dt*(rho_AP_solid*phi + rho_HTPB_solid*(1-phi))*N(0)*rho_tot_gas(i,j,k)*velocity_mult; // Update the velocity source term based on conservation of mass
-            u0_patch(i,j,k,1) = deta_dt*(rho_AP_solid*phi + rho_HTPB_solid*(1-phi))*N(1)*rho_tot_gas(i,j,k)*velocity_mult;
+            u0_patch(i,j,k,0) = hydro.u0_ap*phi + hydro.u0_htpb*(1.0 - phi);
+            u0_patch(i,j,k,1) = 0.0;
+
+            // u0_patch(i,j,k,0) = deta_dt*(hydro.rho_ap*phi + hydro.rho_htpb*(1-phi))*N(0)*rho_tot_gas(i,j,k)*velocity_mult; // Update the velocity source term based on conservation of mass
+            // u0_patch(i,j,k,1) = deta_dt*(hydro.rho_ap*phi + hydro.rho_htpb*(1-phi))*N(1)*rho_tot_gas(i,j,k)*velocity_mult;
         #if AMREX_SPACEDIM == 3
         u0_patch(i,j,k,2) = deta_dt*(rho_AP_solid*phi + rho_HTPB_solid*(1-phi))*N(2)*rho_tot_gas(i,j,k)*velocity_mult;
         #endif
