@@ -198,7 +198,7 @@ hydro.gas.thermo.cpconstant.Tref = 0.0_K
 
 hydro.gas.transport.type = mixture_averaged
 hydro.gas.transport.mixture_averaged.type = constant
-hydro.gas.transport.mixture_averaged.mu = 3.0_Pa*s
+hydro.gas.transport.mixture_averaged.mu = 1.0e-5_Pa*s
 hydro.gas.transport.mixture_averaged.k = 0.023_W/m/K
 
 hydro.gas.eos.type = cpg
