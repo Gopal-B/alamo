@@ -285,8 +285,15 @@ void Hydro::Mix(int lev)
             // Initially compute primitives (T,P,u) from given initial conditions
             // But from then on, compute them from mixed values to avoid zero T conditions
             // Except velocity - keep velocity from fluid values only
-            gas.ComputeLocalFractions(rho, Y, X, i,j,k); // Get local mole/mass fractions from fluid densities
-            Set::Scalar density = gas.ComputeD(rho, i, j, k); // If a gas mixture, this will compute the mixture density
+            //
+            // Advance() swaps density_old_mf<->density_mf right before calling Mix(), so
+            // at this point density_old_mf holds the true, just-completed previous state
+            // and density_mf (rho/M/E below) is stale scratch left over from two steps
+            // ago, about to be overwritten. Read the pre-mix inputs from rho_old, not
+            // rho, or every step re-mixes from two-step-old data and (via rho_old(i,j,k)
+            // = rho(i,j,k) below) clobbers the correct state with it.
+            gas.ComputeLocalFractions(rho_old, Y, X, i,j,k); // Get local mole/mass fractions from fluid densities
+            Set::Scalar density = gas.ComputeD(rho_old, i, j, k); // If a gas mixture, this will compute the mixture density
             T(i,j,k) = gas.ComputeT(p(i,j,k), density, X, i, j, k);
 
             // Extract the genuine fluid-phase density from the current mixed field instead
@@ -295,7 +302,7 @@ void Hydro::Mix(int lev)
             // fluid-only density here too, not the raw blended one -- otherwise M/E end up
             // an inconsistent mix of a fluid quantity (v) and a blended quantity (rho), and
             // repeated calls (Mix() runs every step) drag the fluid region toward rho_solid.
-            Set::Scalar rho_fluid = (rho(i,j,k) - rho_solid(i,j,k)*(1.0 - eta)) / (eta + small);
+            Set::Scalar rho_fluid = (rho_old(i,j,k) - rho_solid(i,j,k)*(1.0 - eta)) / (eta + small);
             Set::Scalar E_fluid = gas.ComputeE(rho_fluid, rho_fluid*v(i,j,k,0), rho_fluid*v(i,j,k,1), T(i,j,k), X, i, j, k);
 
             // Mix
@@ -769,9 +776,8 @@ void Hydro::RHS(int lev, Set::Scalar /*time*/,
                 (flux_ylo.mass - flux_yhi.mass) / DX[1] +
                 Source(i, j, k, 0);
 
-            // Same degenerate-division hazard as the flux/velocity computations above:
-            // below cutoff this cell is treated as pure solid, so it should not receive
-            // a fluid-interface-transport correction.
+            // Below cutoff this cell is treated as pure solid, so it should not
+            // receive a fluid-interface-transport correction.
             Set::Scalar rho_etadot_term = (eta < cutoff) ? 0.0 :
                 etadot(i,j,k) * (rho(i,j,k) - rho_solid(i,j,k)) / (eta + small);
 
