@@ -118,6 +118,7 @@ Flame::Parse(Flame& value, IO::ParmParse& pp)
     pp.select<BC::Constant>("pf.eta.bc", value.bc_eta, 1 ); 
     value.RegisterNewFab(value.eta_mf, value.bc_eta, 1, 2, "eta", true);
     value.RegisterNewFab(value.eta_old_mf, value.bc_eta, 1, 2, "eta_old", false);
+    value.RegisterNewFab(value.deta_dt_mf, value.bc_eta, 1, 2, "deta_dt", true);
 
     // phase field initial condition
     pp.select<IC::Laminate,IC::Constant,IC::Expression,IC::BMP,IC::PNG>("pf.eta.ic",value.ic_eta,value.geom); 
@@ -414,6 +415,7 @@ void Flame::UpdateFluxes(int lev, Set::Scalar a_time, Set::Scalar dt)
         Set::Patch<Set::Scalar> pressure = Hydro::pressure_mf.Patch(lev,mfi); // Call the pressure from the Hydro integrator
         Set::Patch<Set::Scalar> u0 = Hydro::u0_mf.Patch(lev,mfi);
         Set::Patch<const Set::Scalar> p = Hydro::pressure_mf.Patch(lev,mfi);
+        Set::Patch<Set::Scalar> deta_dt = deta_dt_mf.Patch(lev,mfi);
 
         Real M_AP = 27.645; // Molar mass of mixture after AP undergos pyrolysis (kg/mol)
         Real M_HTPB = 28.0532; // Molar mass of Ethylene, main product of HTPB pyrolysis
@@ -443,16 +445,13 @@ void Flame::UpdateFluxes(int lev, Set::Scalar a_time, Set::Scalar dt)
             rho_AP_gas(i,j,k) = pressure(i,j,k)*M_AP/(R*temp_gas); // Density of AP gaseous products assuming ideal gas
             rho_HTPB_gas(i,j,k) = pressure(i,j,k)*M_HTPB/(R*temp_gas); // Density of HTPB gaseous products assuming ideal gas
             rho_tot_gas(i,j,k) = rho_AP_gas(i,j,k)*phi + rho_HTPB_gas(i,j,k)*(1.0 - phi); // Find the average density of the fluid based on the solid species
-            Set::Scalar deta_dt = (eta_hydro - etaold_hydro)/(dt); // time derivate approximation of eta
+            deta_dt(i,j,k) = (eta_hydro - etaold_hydro)/(dt); // time derivate approximation of eta
 
-            // m0(i,j,k) = (hydro.rho_ap*phi + hydro.rho_htpb*(1.0 - phi))*deta_dt*0.1; // example of setting value to m0
-            m0(i,j,k) = 0.0;
-            solidrho(i,j,k) = hydro.rho_ap*phi + hydro.rho_htpb*(1.0 - phi); // Physical solid-phase density used by Hydro::Mix, distinct from the m0 mass-flux source
+            m0(i,j,k) = (hydro.rho_ap*phi + hydro.rho_htpb*(1.0 - phi)); // example of setting value to m0
+            // m0(i,j,k) = 0.0;
+            solidrho(i,j,k) = m0(i,j,k); // Physical solid-phase density used by Hydro::Mix, distinct from the m0 mass-flux source
 
             Set::Vector u0;
-            // u0(0) = hydro.u0_ap*phi + hydro.u0_htpb*(1.0 - phi)*deta_dt*0.1;
-            // u0(1) = 0.0;
-
             u0(0) = 0.0;
             u0(1) = 0.0;
             #if AMREX_SPACEDIM == 3
@@ -485,13 +484,13 @@ void Flame::UpdateFluxes(int lev, Set::Scalar a_time, Set::Scalar dt)
             u0_patch(i,j,k,0) = 0.0;
             u0_patch(i,j,k,1) = 0.0;
 
-            // u0_patch(i,j,k,0) = (hydro.u0_ap*phi + hydro.u0_htpb*(1.0 - phi))*deta_dt*0.1;
+            // u0_patch(i,j,k,0) = (hydro.u0_ap*phi + hydro.u0_htpb*(1.0 - phi));
             // u0_patch(i,j,k,1) = 0.0;
 
-            // u0_patch(i,j,k,0) = deta_dt*(hydro.rho_ap*phi + hydro.rho_htpb*(1-phi))*N(0)*rho_tot_gas(i,j,k)*velocity_mult; // Update the velocity source term based on conservation of mass
-            // u0_patch(i,j,k,1) = deta_dt*(hydro.rho_ap*phi + hydro.rho_htpb*(1-phi))*N(1)*rho_tot_gas(i,j,k)*velocity_mult;
+            // u0_patch(i,j,k,0) = deta_dt(i,j,k)*(hydro.rho_ap*phi + hydro.rho_htpb*(1-phi))*N(0)*rho_tot_gas(i,j,k)*velocity_mult; // Update the velocity source term based on conservation of mass
+            // u0_patch(i,j,k,1) = deta_dt(i,j,k)*(hydro.rho_ap*phi + hydro.rho_htpb*(1-phi))*N(1)*rho_tot_gas(i,j,k)*velocity_mult;
         #if AMREX_SPACEDIM == 3
-        u0_patch(i,j,k,2) = deta_dt*(rho_AP_solid*phi + rho_HTPB_solid*(1-phi))*N(2)*rho_tot_gas(i,j,k)*velocity_mult;
+        u0_patch(i,j,k,2) = deta_dt(i,j,k)*(rho_AP_solid*phi + rho_HTPB_solid*(1-phi))*N(2)*rho_tot_gas(i,j,k)*velocity_mult;
         #endif
         });
     }

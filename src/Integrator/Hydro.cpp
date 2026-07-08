@@ -446,7 +446,7 @@ void Hydro::Advance(int lev, Set::Scalar time, Set::Scalar dt)
     {
         const amrex::Box& bx = mfi.validbox();
         const Set::Scalar* DX = geom[lev].CellSize();
-        
+
         Set::Patch<const Set::Scalar> eta_patch = eta_mf->Patch(lev,mfi);
         Set::Patch<const Set::Scalar> rho_solid = solid.density_mf.Patch(lev,mfi);
         Set::Patch<const Set::Scalar> M_solid   = solid.momentum_mf.Patch(lev,mfi);
@@ -457,14 +457,14 @@ void Hydro::Advance(int lev, Set::Scalar time, Set::Scalar dt)
         Set::Patch<Set::Scalar> M_new         = momentum_mf.Patch(lev,mfi);
 
         Set::Patch<Set::Scalar> omega         = vorticity_mf.Patch(lev,mfi);
-        
+
         Set::Patch<Set::Scalar> u = velocity_mf.Patch(lev,mfi);
         Set::Patch<Set::Scalar> Source = Source_mf.Patch(lev,mfi);
 
         Set::Scalar *dt_max_handle = &dt_max;
 
         amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k)
-        {   
+        {
             Set::Scalar eta = invert ? 1.0-eta_patch(i,j,k)*eta_patch(i,j,k) : eta_patch(i,j,k);
 
             if (eta < cutoff)
