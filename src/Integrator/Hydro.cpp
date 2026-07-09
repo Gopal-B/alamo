@@ -732,23 +732,32 @@ void Hydro::RHS(int lev, Set::Scalar /*time*/,
             Solver::Local::Riemann::State state_y_solid  (rho_solid, M_solid, E_solid, i, j  , k, Y); 
             Solver::Local::Riemann::State state_yhi_solid(rho_solid, M_solid, E_solid, i, j+1, k, Y); 
 
-            Solver::Local::Riemann::State state_xlo_fluid = invert ? 
-                (state_xlo - (eta_patch(i-1,j,k))*state_xlo_solid) / (1.0 - eta_patch(i-1,j,k) + small) :
+            // NOTE: when invert=true, eta (fluid fraction) = 1 - eta_patch^2 everywhere else
+            // in this file (Mix(), RHS velocity extraction, Source/cutoff scaling). The
+            // de-mix weights below must use eta_patch*eta_patch (solid fraction) and
+            // 1-eta_patch*eta_patch (fluid fraction) to stay consistent with that transform,
+            // not bare eta_patch/(1-eta_patch) -- those diverge sharply from the correct
+            // eta_patch^2/(1-eta_patch^2) for intermediate eta_patch values (e.g. eta_patch
+            // ~0.93 gives eta_patch=0.93 vs eta_patch^2=0.865, a large relative difference),
+            // producing wildly wrong (even negative-density) fluid states at those interface
+            // cells feeding directly into the Riemann solver.
+            Solver::Local::Riemann::State state_xlo_fluid = invert ?
+                (state_xlo - (eta_patch(i-1,j,k)*eta_patch(i-1,j,k))*state_xlo_solid) / (1.0 - eta_patch(i-1,j,k)*eta_patch(i-1,j,k) + small) :
                 (state_xlo - (1.0 - eta_patch(i-1,j,k))*state_xlo_solid) / (eta_patch(i-1,j,k) + small);
-            Solver::Local::Riemann::State state_x_fluid   = invert ? 
-                (state_x   - (eta_patch(i,j,k)  )*state_x_solid  )   / (1.0 - eta_patch(i,j,k)   + small): 
+            Solver::Local::Riemann::State state_x_fluid   = invert ?
+                (state_x   - (eta_patch(i,j,k)*eta_patch(i,j,k)  )*state_x_solid  )   / (1.0 - eta_patch(i,j,k)*eta_patch(i,j,k)   + small):
                 (state_x   - (1.0 - eta_patch(i,j,k)  )*state_x_solid  ) / (eta_patch(i,j,k)   + small);
-            Solver::Local::Riemann::State state_xhi_fluid = invert ? 
-                (state_xhi - (eta_patch(i+1,j,k))*state_xhi_solid) / (1.0 - eta_patch(i+1,j,k) + small) : 
+            Solver::Local::Riemann::State state_xhi_fluid = invert ?
+                (state_xhi - (eta_patch(i+1,j,k)*eta_patch(i+1,j,k))*state_xhi_solid) / (1.0 - eta_patch(i+1,j,k)*eta_patch(i+1,j,k) + small) :
                 (state_xhi - (1.0 - eta_patch(i+1,j,k))*state_xhi_solid) / (eta_patch(i+1,j,k) + small);
-            Solver::Local::Riemann::State state_ylo_fluid = invert ? 
-                (state_ylo - (eta_patch(i,j-1,k))*state_ylo_solid) / (1.0 - eta_patch(i,j-1,k) + small): 
+            Solver::Local::Riemann::State state_ylo_fluid = invert ?
+                (state_ylo - (eta_patch(i,j-1,k)*eta_patch(i,j-1,k))*state_ylo_solid) / (1.0 - eta_patch(i,j-1,k)*eta_patch(i,j-1,k) + small):
                 (state_ylo - (1.0 - eta_patch(i,j-1,k))*state_ylo_solid) / (eta_patch(i,j-1,k) + small);
-            Solver::Local::Riemann::State state_y_fluid =   invert ? 
-                (state_y   - (eta_patch(i,j,k)  )*state_y_solid  )  / (1.0 - eta_patch(i,j,k)   + small): 
+            Solver::Local::Riemann::State state_y_fluid =   invert ?
+                (state_y   - (eta_patch(i,j,k)*eta_patch(i,j,k)  )*state_y_solid  )  / (1.0 - eta_patch(i,j,k)*eta_patch(i,j,k)   + small):
                 (state_y   - (1.0 - eta_patch(i,j,k)  )*state_y_solid  ) / (eta_patch(i,j,k)   + small);
-            Solver::Local::Riemann::State state_yhi_fluid = invert ? 
-                (state_yhi - (eta_patch(i,j+1,k))*state_yhi_solid) / (1.0 - eta_patch(i,j+1,k) + small): 
+            Solver::Local::Riemann::State state_yhi_fluid = invert ?
+                (state_yhi - (eta_patch(i,j+1,k)*eta_patch(i,j+1,k))*state_yhi_solid) / (1.0 - eta_patch(i,j+1,k)*eta_patch(i,j+1,k) + small):
                 (state_yhi - (1.0 - eta_patch(i,j+1,k))*state_yhi_solid) / (eta_patch(i,j+1,k) + small);
 
             Solver::Local::Riemann::Flux flux_xlo, flux_ylo, flux_xhi, flux_yhi;
@@ -769,7 +778,6 @@ void Hydro::RHS(int lev, Set::Scalar /*time*/,
                 Util::ParallelMessage(INFO,"i=",i,"j=",j);
                 Util::Abort(INFO);
             }
-                
 
             Set::Scalar drhof_dt =
                 (flux_xlo.mass - flux_xhi.mass) / DX[0] +
