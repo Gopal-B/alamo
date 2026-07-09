@@ -186,6 +186,12 @@ protected:
     bool invert = false;
 
     std::vector<bool> mixed;
+    std::vector<int> mix_counter;
+    // Re-run Mix() every remix_interval steps instead of only at t=0 (0 = never / Mix-once).
+    // Mix-once lets the mixed (rho,M,E) field drift away from a physically consistent
+    // fluid/solid decomposition over many steps with nothing pulling it back; periodic
+    // re-mixing caps that drift while still letting velocity evolve freely in between.
+    int remix_interval = 0;
 
 };
 }

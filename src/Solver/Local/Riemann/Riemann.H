@@ -87,6 +87,24 @@ struct State {
     {
         return State(b.rho/alpha, b.M_normal/alpha, b.M_tangent/alpha, b.E/alpha);
     }
+
+    // De-mixing a mixed (fluid+solid) state via (state - solid_weight*state_solid)/(fluid_weight+small)
+    // is ill-conditioned wherever fluid_weight is small: a tiny mismatch between the mixed field
+    // (evolved by flux divergence) and the "solid" reference used for de-mixing gets amplified by
+    // 1/fluid_weight, and can easily produce negative rho or a rho/M/E combination with negative
+    // specific internal energy. That kind of state, fed into an EOS-based Riemann solver, produces
+    // wildly wrong temperature/pressure/sound speed and cascades into a runaway flux at that face.
+    // Regularize() enforces the two physical constraints a fluid state must satisfy -- positive
+    // density and non-negative specific internal energy -- without touching momentum, so it doesn't
+    // inject any spurious velocity; it only prevents already-corrupted mass/energy bookkeeping from
+    // being handed to the solver as if it were physical.
+    void Regularize(Set::Scalar small)
+    {
+        if (rho < small) rho = small;
+        Set::Scalar ke = 0.5 * (M_normal * M_normal + M_tangent * M_tangent) / rho;
+        Set::Scalar ue_min = small * rho;
+        if (E < ke + ue_min) E = ke + ue_min;
+    }
 };
 
 struct Flux {

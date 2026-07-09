@@ -87,6 +87,8 @@ Hydro::Parse(Hydro& value, IO::ParmParse& pp)
         pp_query_default("small",value.small,1E-8); // small regularization value
         pp_query_default("cutoff",value.cutoff,-1E100); // cutoff value
         pp_query_default("lagrange",value.lagrange,0.0); // lagrange no-penetration factor
+        // Re-run Mix() every N steps instead of only once at t=0 (0 = Mix-once, never re-mix)
+        pp_query_default("remix_interval",value.remix_interval,0);
 
         pp_forbid("roefix","--> solver.roe.entropy_fix"); // Roe solver entropy fix
 
@@ -246,13 +248,25 @@ void Hydro::Initialize(int lev)
 
     Source_mf[lev]   ->setVal(0.0);
 
-    if (managed)  { if (lev >= (int)mixed.size()) mixed.push_back(false);}
+    if (managed)  { if (lev >= (int)mixed.size()) mixed.push_back(false); if (lev >= (int)mix_counter.size()) mix_counter.push_back(0);}
     else  Mix(lev);
 }
 
 void Hydro::Mix(int lev)
 {
-    if (managed && mixed[lev]) return;
+    if (managed && mixed[lev])
+    {
+        if (remix_interval > 0)
+        {
+            mix_counter[lev]++;
+            if (mix_counter[lev] >= remix_interval)
+            {
+                mixed[lev] = false;
+                mix_counter[lev] = 0;
+            }
+        }
+        if (mixed[lev]) return;
+    }
 
     for (amrex::MFIter mfi(*velocity_mf[lev], true); mfi.isValid(); ++mfi)
     {
@@ -302,7 +316,14 @@ void Hydro::Mix(int lev)
             // fluid-only density here too, not the raw blended one -- otherwise M/E end up
             // an inconsistent mix of a fluid quantity (v) and a blended quantity (rho), and
             // repeated calls (Mix() runs every step) drag the fluid region toward rho_solid.
-            Set::Scalar rho_fluid = (rho_old(i,j,k) - rho_solid(i,j,k)*(1.0 - eta)) / (eta + small);
+            // Same de-mix ill-conditioning as the Riemann flux states (see Regularize() in
+            // Riemann.H): at low-eta cells a tiny mismatch between the mixed field and the
+            // solid reference gets amplified by 1/eta and can go negative. A negative
+            // rho_fluid here doesn't feed the Riemann solver directly, but it does poison
+            // M/E for this cell (and, since gas.ComputeE derives E from rho_fluid and the
+            // -- already sane -- T, a negative rho_fluid just flips the sign of otherwise
+            // reasonable terms rather than blowing up). Floor it like the flux states.
+            Set::Scalar rho_fluid = std::max(small, (rho_old(i,j,k) - rho_solid(i,j,k)*(1.0 - eta)) / (eta + small));
             Set::Scalar E_fluid = gas.ComputeE(rho_fluid, rho_fluid*v(i,j,k,0), rho_fluid*v(i,j,k,1), T(i,j,k), X, i, j, k);
 
             // Mix
@@ -332,6 +353,8 @@ void Hydro::Mix(int lev)
     c_max = 0.0;
     vx_max = 0.0;
     vy_max = 0.0;
+
+    if (managed) mixed[lev] = true;
 }
 
 void Hydro::UpdateEta(int lev, Set::Scalar time)
@@ -760,6 +783,19 @@ void Hydro::RHS(int lev, Set::Scalar /*time*/,
                 (state_yhi - (eta_patch(i,j+1,k)*eta_patch(i,j+1,k))*state_yhi_solid) / (1.0 - eta_patch(i,j+1,k)*eta_patch(i,j+1,k) + small):
                 (state_yhi - (1.0 - eta_patch(i,j+1,k))*state_yhi_solid) / (eta_patch(i,j+1,k) + small);
 
+            // The de-mix above is ill-conditioned wherever the fluid-fraction weight is small
+            // (mostly-solid cells near, but above, cutoff): a tiny mismatch between the evolving
+            // mixed field and the solid reference gets amplified by 1/fluid_weight and can produce
+            // negative density or negative specific internal energy. Regularize() enforces those
+            // two physical constraints (without touching momentum) before these states reach the
+            // Riemann solver -- see Riemann::State::Regularize for the full rationale.
+            state_xlo_fluid.Regularize(small);
+            state_x_fluid.Regularize(small);
+            state_xhi_fluid.Regularize(small);
+            state_ylo_fluid.Regularize(small);
+            state_y_fluid.Regularize(small);
+            state_yhi_fluid.Regularize(small);
+
             Solver::Local::Riemann::Flux flux_xlo, flux_ylo, flux_xhi, flux_yhi;
 
             try
@@ -852,7 +888,7 @@ void Hydro::RHS(int lev, Set::Scalar /*time*/,
                     E_etadot_term
                 // ) * dt;
                 ;
-            
+
 #ifdef AMREX_DEBUG
             if ((rho_rhs(i,j,k) != rho_rhs(i,j,k)) ||
                 (M_rhs(i,j,k,0) != M_rhs(i,j,k,0)) ||

@@ -266,6 +266,7 @@ hydro.u0_htpb = 20
 hydro.density.ic.constant.value = 1.0
 hydro.m0.ic.constant.value = "1.0" 
 hydro.lagrange= 1.0
+hydro.remix_interval = 20
 hydro.solver.type = roe
 hydro.cfl   = 10.0
 hydro.cfl_v   = 10.0
