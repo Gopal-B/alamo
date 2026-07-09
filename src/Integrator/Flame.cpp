@@ -495,8 +495,18 @@ void Flame::UpdateFluxes(int lev, Set::Scalar a_time, Set::Scalar dt)
         });
     }
 
-    Util::RealFillBoundary(*solid.density_mf[lev],geom[lev]);
-    Util::RealFillBoundary(*solid.momentum_mf[lev],geom[lev]);
+    // Util::RealFillBoundary is a plain MultiFab::FillBoundary() with no BC object -- it only
+    // exchanges ghost cells shared between boxes (or across periodic boundaries), and leaves
+    // ghost cells at the *physical* domain boundary untouched after their one-time IC fill.
+    // Since UpdateFluxes only writes solid.density_mf/solid.momentum_mf in the valid region
+    // (mfi.tilebox()) every step, those physical-boundary ghosts go permanently stale while the
+    // valid-cell values keep evolving with m0/phi, producing a large, spurious jump right at
+    // the domain edge that feeds directly into the boundary-adjacent Riemann flux states. Use
+    // the real BC objects (already assigned at registration) so physical boundaries get a
+    // proper (zero-Neumann) fill too, not just inter-box ghosts.
+    neumann_bc_1.FillBoundary(*solid.density_mf[lev], 0, 1, a_time, 0);
+    neumann_bc_D.FillBoundary(*solid.momentum_mf[lev], 0, 2, a_time, 0);
+    neumann_bc_1.FillBoundary(*solid.energy_mf[lev], 0, 1, a_time, 0);
     Util::RealFillBoundary(*m0_mf[lev],geom[lev]);
     Util::RealFillBoundary(*u0_mf[lev],geom[lev]);
 }
