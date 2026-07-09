@@ -135,6 +135,16 @@ public:
         }
         //////////////////////////////////////////////////////////////////////////////////////////////////
 
+        // rho_L/rho_R were floored above (density-only clamp), but E_L/E_R/Mn/Mt were not
+        // adjusted to match -- at cells where the fluid-fraction de-mix (state - solid)/(eta+small)
+        // is ill-conditioned (small eta), the pre-clamp density can come out negative while E stays
+        // whatever it was, so ComputeP/ComputeT above can return a wildly wrong (large negative)
+        // pressure/temperature for a state whose density was just floored to a small positive value.
+        // That energy-density-inconsistent state then poisons the Roe-averaged enthalpy/sound speed
+        // below. Floor the derived pressure to keep it physical, consistent with the density floor.
+        p_L = std::max(small, p_L);
+        p_R = std::max(small, p_R);
+
         Set::Scalar ke_L = 0.5 * (Mn_L * Mn_L /*+ Mt_L * Mt_L*/) / (rho_L+small); // KE per unit volume
         Set::Scalar ue_L = E_L - ke_L;                                            // IE per unit volume
         Set::Scalar h_TL = (ke_L + ue_L + p_L) / (rho_L+small);                   // specific stagnation enthalpy (per unit mass)
