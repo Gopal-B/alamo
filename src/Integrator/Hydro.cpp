@@ -797,8 +797,6 @@ void Hydro::RHS(int lev, Set::Scalar /*time*/,
                     rho_etadot_term
                 // ) * dt;
                 ;
-
-
                 
             Set::Scalar dMxf_dt =
                 (flux_xlo.momentum_normal  - flux_xhi.momentum_normal ) / DX[0] +
