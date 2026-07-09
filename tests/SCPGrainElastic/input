@@ -224,7 +224,7 @@ hydro.solid.momentum.ic.expression.region0 = "0.0"
 hydro.solid.momentum.ic.expression.region1 = "0.0"
 
 hydro.solid.energy.ic.type = expression
-hydro.solid.energy.ic.expression.region0 = "5.0"
+hydro.solid.energy.ic.expression.region0 = "0.0"
 
 ### HYDRO BC ###
 
