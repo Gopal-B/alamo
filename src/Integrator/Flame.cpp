@@ -416,6 +416,7 @@ void Flame::UpdateFluxes(int lev, Set::Scalar a_time, Set::Scalar dt)
         Set::Patch<Set::Scalar> u0 = Hydro::u0_mf.Patch(lev,mfi);
         Set::Patch<const Set::Scalar> p = Hydro::pressure_mf.Patch(lev,mfi);
         Set::Patch<Set::Scalar> deta_dt = deta_dt_mf.Patch(lev,mfi);
+        Set::Patch<Set::Scalar> q0 = Hydro::q_mf.Patch(lev,mfi);
 
         Real M_AP = 27.645; // Molar mass of mixture after AP undergos pyrolysis (kg/mol)
         Real M_HTPB = 28.0532; // Molar mass of Ethylene, main product of HTPB pyrolysis
@@ -448,6 +449,8 @@ void Flame::UpdateFluxes(int lev, Set::Scalar a_time, Set::Scalar dt)
             deta_dt(i,j,k) = (eta_hydro - etaold_hydro)/(dt); // time derivate approximation of eta
 
             m0(i,j,k) = (hydro.rho_ap*phi + hydro.rho_htpb*(1.0 - phi)); // example of setting value to m0
+            q0(i,j,k) = m0(i,j,k)*2.0;
+
             // m0(i,j,k) = 0.0;
             solidrho(i,j,k) = m0(i,j,k); // Physical solid-phase density used by Hydro::Mix, distinct from the m0 mass-flux source
 

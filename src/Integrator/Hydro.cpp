@@ -108,6 +108,7 @@ Hydro::Parse(Hydro& value, IO::ParmParse& pp)
 
         value.RegisterNewFab(value.density_mf,     value.density_bc, 1, nghost, "density",     true , true);
         value.RegisterNewFab(value.density_old_mf, value.density_bc, 1, nghost, "density_old", false, true);
+        value.RegisterNewFab(value.density_fluid_mf, &value.bc_nothing, 1, nghost, "density_fluid", true, false);
 
         value.RegisterNewFab(value.energy_mf,     value.energy_bc, 1, nghost, "energy",      true ,true);
         value.RegisterNewFab(value.energy_old_mf, value.energy_bc, 1, nghost, "energy_old" , false, true);
@@ -291,6 +292,7 @@ void Hydro::Mix(int lev)
 
         Set::Patch<Set::Scalar>       rho_solid_old = solid.density_old_mf.Patch(lev,mfi);
         Set::Patch<Set::Scalar>       change_rho_solid = solid.change_density_mf.Patch(lev,mfi);
+        Set::Patch<Set::Scalar>       rho_fluid_out = density_fluid_mf.Patch(lev,mfi);
 
         amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k)
         {
@@ -324,6 +326,7 @@ void Hydro::Mix(int lev)
             // -- already sane -- T, a negative rho_fluid just flips the sign of otherwise
             // reasonable terms rather than blowing up). Floor it like the flux states.
             Set::Scalar rho_fluid = std::max(small, (rho_old(i,j,k) - rho_solid(i,j,k)*(1.0 - eta)) / (eta + small));
+            rho_fluid_out(i,j,k) = rho_fluid;
             Set::Scalar E_fluid = gas.ComputeE(rho_fluid, rho_fluid*v(i,j,k,0), rho_fluid*v(i,j,k,1), T(i,j,k), X, i, j, k);
 
             // Mix
