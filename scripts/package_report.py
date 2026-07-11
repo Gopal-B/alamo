@@ -72,7 +72,7 @@ def extract_paths_from_html(html_file, seen=None):
 def create_tarball(files, output_path):
     with tarfile.open(output_path, "w:gz") as tar:
         for file in files:
-            arcname = file.relative_to(REPORT_DIR.parent)
+            arcname = file.relative_to(REPORT_DIR.absolute())
             tar.add(file, arcname=arcname)
 
 def copy_to_directory(files, output_path):
@@ -98,9 +98,6 @@ def main():
         return
 
     print("Scraping report.html...")
-<<<<<<< HEAD
-    files = extract_paths_from_html(REPORT_HTML)
-=======
     files = set()
     if REPORT_HTML.exists():
         files.update(extract_paths_from_html(REPORT_HTML.absolute()))
@@ -111,7 +108,6 @@ def main():
     files = [p for p in files if p.exists()]
 
     for f in files: print(f)
->>>>>>> 7a567185b
 
     print(f"Found {len(files)} files. Creating {args.name}...")
     if args.name.endswith(".tar.gz"):
