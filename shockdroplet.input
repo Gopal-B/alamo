@@ -1,0 +1,144 @@
+# ==========================================
+# Simulation Control
+# ==========================================
+plot_file = ShockDroplet2D_coarse
+
+timestep  = 5.0e-7
+stop_time = 1.5e-2
+max_step  = 200000
+
+# ==========================================
+# AMR / Grid Parameters (FULL 2D DOMAIN)
+# Half-domain paper height = 37 mm
+# Full domain height = 74 mm
+#
+# Start coarse first for debugging
+# ==========================================
+amr.plot_int        = 10
+amr.max_level       = 0
+amr.n_cell          = 250 74 1
+amr.blocking_factor = 1
+amr.regrid_int      = -1
+amr.grid_eff        = 1.0
+
+# Domain in meters
+geometry.prob_lo     = 0.0   0.0    0.0
+geometry.prob_hi     = 0.25  0.074  0.1
+geometry.is_periodic = 0 0 0
+
+# ==========================================
+# Solver Configuration
+
+# ==========================================
+SolverType          = SolveFiveEquationModel
+cflNumber           = 0.5
+
+TimeSteppingScheme  = RK3
+FluxScheme          = HLLC
+FluxReconstruction  = WENO
+WenoVariant         = WENOZ5
+ReconstructionMode  = Characteristic
+
+# ==========================================
+# Physics Constants
+# Phase-1 = water, Phase-2 = air
+#
+
+# ==========================================
+ic.shock.pvec.gamma1 = 6.68
+ic.shock.pvec.gamma2 = 1.4
+ic.shock.pvec.pi1    = 3.05e8
+ic.shock.pvec.pi2    = 0.0
+
+# ==========================================
+# Initial Conditions: shock-droplet
+# ==========================================
+ic.pvec.type        = shockdroplet
+ic.pressure.type    = shockdroplet
+
+# ------------------------------------------
+# Driver region
+# Paper: 1.5 mm < x <= 2.5 mm
+# For full 2D, let it span the full height
+# ------------------------------------------
+ic.shockdroplet.geometry.x_driver_lo = 1.5e-3
+ic.shockdroplet.geometry.x_driver_hi = 2.5e-3
+ic.shockdroplet.geometry.y_driver_lo = 0.0
+ic.shockdroplet.geometry.y_driver_hi = 7.4e-2
+
+# ------------------------------------------
+# Water column
+# Diameter = 22 mm => radius = 11 mm
+# Full-domain centerline is now y = 37 mm
+# ------------------------------------------
+ic.shockdroplet.geometry.droplet_center_x = 4.0e-2
+ic.shockdroplet.geometry.droplet_center_y = 3.7e-2
+ic.shockdroplet.geometry.droplet_radius   = 1.1e-2
+
+# sharp interface for first run
+ic.shockdroplet.geometry.interface_thickness = 0
+
+# Phase convention
+ic.shockdroplet.phase1_is_liquid = 1
+
+# ------------------------------------------
+# Ambient gas
+# ------------------------------------------
+ic.shockdroplet.ambient.rho = 1.17
+ic.shockdroplet.ambient.p   = 1.01e5
+ic.shockdroplet.ambient.u   = 0.0
+ic.shockdroplet.ambient.v   = 0.0
+
+# ------------------------------------------
+# Driver gas
+# ------------------------------------------
+ic.shockdroplet.driver.rho = 580.7
+ic.shockdroplet.driver.p   = 5.0e7
+ic.shockdroplet.driver.u   = 0.0
+ic.shockdroplet.driver.v   = 0.0
+
+# ------------------------------------------
+# Liquid droplet
+# ------------------------------------------
+ic.shockdroplet.liquid.rho = 1000.0
+ic.shockdroplet.liquid.p   = 1.01e5
+ic.shockdroplet.liquid.u   = 0.0
+ic.shockdroplet.liquid.v   = 0.0
+
+# ==========================================
+# Boundary Conditions
+# FULL 2D closed box version:
+# xlo, xhi, ylo, yhi all treated as walls/zero-gradient
+#
+
+# ==========================================
+
+# 6 components: [M1, M2, MOMX, MOMY, ETOT, ALPHA]
+
+bc.pvec.type.xlo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.xhi = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.ylo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.yhi = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.zlo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.zhi = neumann neumann neumann neumann neumann neumann
+
+bc.pvec.val.xlo  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.xhi  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.ylo  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.yhi  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.zlo  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.zhi  = 0.0 0.0 0.0 0.0 0.0 0.0
+
+bc.pressure.type.xlo = neumann
+bc.pressure.type.xhi = neumann
+bc.pressure.type.ylo = neumann
+bc.pressure.type.yhi = neumann
+bc.pressure.type.zlo = neumann
+bc.pressure.type.zhi = neumann
+
+bc.pressure.val.xlo = 0.0
+bc.pressure.val.xhi = 0.0
+bc.pressure.val.ylo = 0.0
+bc.pressure.val.yhi = 0.0
+bc.pressure.val.zlo = 0.0
+bc.pressure.val.zhi = 0.0
