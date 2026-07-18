@@ -10,7 +10,7 @@
 #include "Model/Fluid/Fluid.H" 
 #include "Numeric/Stencil.H" 
 #include "Numeric/NumericTypes.H"
-
+#include "Model/Fluid/FiveEquation.H"
 #include "Numeric/SolverCapabilities.H"
 #include "Numeric/IntegratorVariableAccessLayer.H"
 #include "Numeric/SymmetryPreservingRoeAveragingOperations.H"
@@ -45,6 +45,212 @@ inline void ShiftAndClampIndices(int indices[3], const int offsets[3],
         indices[d] = lower_bounds[d] + std::min(std::max(shifted_index - lower_bounds[d], 0), upper_bounds[d] - lower_bounds[d]);
     }
 }
+constexpr int DI5_MAX_NCOMP = 7;
+
+// ========================= DI5 positivity helpers =========================
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+bool DI5Finite(Set::Scalar x) {
+    return std::isfinite(static_cast<double>(x));
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5Clamp01(Set::Scalar x) {
+    return amrex::max(Set::Scalar(0.0), amrex::min(Set::Scalar(1.0), x));
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5Blend(Set::Scalar theta, Set::Scalar hi, Set::Scalar lo) {
+    return theta * hi + (Set::Scalar(1.0) - theta) * lo;
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+bool DI5ThermoAdmissible(
+    Set::Scalar m1,
+    Set::Scalar m2,
+    Set::Scalar p,
+    Set::Scalar alpha,
+    const Model::Fluid::FiveEquation::FluidMixture* mixture_model)
+{
+    constexpr Set::Scalar eps_m   = Set::Scalar(1.0e-14);
+    constexpr Set::Scalar eps_a   = Set::Scalar(1.0e-12);
+    constexpr Set::Scalar eps_c2  = Set::Scalar(1.0e-14);
+
+    if (mixture_model == nullptr) return false;
+    if (!DI5Finite(m1) || !DI5Finite(m2) || !DI5Finite(p) || !DI5Finite(alpha)) return false;
+
+    if (m1 <= eps_m || m2 <= eps_m) return false;
+    if (alpha <= eps_a || alpha >= Set::Scalar(1.0) - eps_a) return false;
+
+    const Set::Scalar rho = m1 + m2;
+    if (!DI5Finite(rho) || rho <= eps_m) return false;
+
+    const Set::Scalar gm  = mixture_model->gamma_mix(alpha);
+    const Set::Scalar pim = mixture_model->pi_mix(alpha);
+
+    if (!DI5Finite(gm) || !DI5Finite(pim)) return false;
+
+    const Set::Scalar c2 = gm * (p + pim) / rho;
+
+
+    if (!DI5Finite(c2) || c2 <= eps_c2) return false;
+
+
+    // constexpr Set::Scalar eps_p = Set::Scalar(1.0e-14);
+    // if (p <= eps_p) return false;
+    return true;
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+bool DI5FaceStateAdmissible(
+    Set::Scalar m1,
+    Set::Scalar m2,
+    Set::Scalar u,
+    Set::Scalar v,
+    Set::Scalar w,
+    Set::Scalar p,
+    Set::Scalar alpha,
+    const Model::Fluid::FiveEquation::FluidMixture* mixture_model)
+{
+    if (!DI5Finite(m1) || !DI5Finite(m2) ||
+        !DI5Finite(u)  || !DI5Finite(v)  || !DI5Finite(w) ||
+        !DI5Finite(p)  || !DI5Finite(alpha)) {
+        return false;
+    }
+
+    return DI5ThermoAdmissible(m1, m2, p, alpha, mixture_model);
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5ThetaForLowerBound(Set::Scalar q_hi, Set::Scalar q_lo, Set::Scalar qmin)
+{
+    if (!DI5Finite(q_hi) || !DI5Finite(q_lo)) return Set::Scalar(0.0);
+    if (q_hi >= qmin) return Set::Scalar(1.0);
+    if (q_lo <= qmin) return Set::Scalar(0.0);
+
+    const Set::Scalar theta = (q_lo - qmin) / (q_lo - q_hi);
+    return amrex::max(Set::Scalar(0.0), amrex::min(Set::Scalar(1.0), theta));
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5ThetaForUpperBound(Set::Scalar q_hi, Set::Scalar q_lo, Set::Scalar qmax)
+{
+    if (!DI5Finite(q_hi) || !DI5Finite(q_lo)) return Set::Scalar(0.0);
+    if (q_hi <= qmax) return Set::Scalar(1.0);
+    if (q_lo >= qmax) return Set::Scalar(0.0);
+
+    const Set::Scalar theta = (qmax - q_lo) / (q_hi - q_lo);
+    return amrex::max(Set::Scalar(0.0), amrex::min(Set::Scalar(1.0), theta));
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+bool DI5AdmissibleAtTheta(
+    Set::Scalar theta,
+    Set::Scalar m1_hi, Set::Scalar m2_hi,
+    Set::Scalar u_hi,  Set::Scalar v_hi,  Set::Scalar w_hi,
+    Set::Scalar p_hi,  Set::Scalar a_hi,
+    Set::Scalar m1_lo, Set::Scalar m2_lo,
+    Set::Scalar u_lo,  Set::Scalar v_lo,  Set::Scalar w_lo,
+    Set::Scalar p_lo,  Set::Scalar a_lo,
+    const Model::Fluid::FiveEquation::FluidMixture* mixture_model)
+{
+    const Set::Scalar m1 = DI5Blend(theta, m1_hi, m1_lo);
+    const Set::Scalar m2 = DI5Blend(theta, m2_hi, m2_lo);
+    const Set::Scalar u  = DI5Blend(theta, u_hi,  u_lo);
+    const Set::Scalar v  = DI5Blend(theta, v_hi,  v_lo);
+    const Set::Scalar w  = DI5Blend(theta, w_hi,  w_lo);
+    const Set::Scalar p  = DI5Blend(theta, p_hi,  p_lo);
+    const Set::Scalar a  = DI5Blend(theta, a_hi,  a_lo);
+
+    return DI5FaceStateAdmissible(m1, m2, u, v, w, p, a, mixture_model);
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5ComputeTheta(
+    Set::Scalar m1_hi, Set::Scalar m2_hi,
+    Set::Scalar u_hi,  Set::Scalar v_hi,  Set::Scalar w_hi,
+    Set::Scalar p_hi,  Set::Scalar a_hi,
+    Set::Scalar m1_lo, Set::Scalar m2_lo,
+    Set::Scalar u_lo,  Set::Scalar v_lo,  Set::Scalar w_lo,
+    Set::Scalar p_lo,  Set::Scalar a_lo,
+    const Model::Fluid::FiveEquation::FluidMixture* mixture_model)
+{
+    constexpr Set::Scalar eps_m = Set::Scalar(1.0e-14);
+    constexpr Set::Scalar eps_a = Set::Scalar(1.0e-12);
+
+    // If already admissible, do nothing
+    if (DI5FaceStateAdmissible(m1_hi, m2_hi, u_hi, v_hi, w_hi, p_hi, a_hi, mixture_model)) {
+        return Set::Scalar(1.0);
+    }
+
+    // If any high-order component is NaN/Inf, go straight to first-order fallback
+    if (!DI5Finite(m1_hi) || !DI5Finite(m2_hi) ||
+        !DI5Finite(u_hi)  || !DI5Finite(v_hi)  || !DI5Finite(w_hi) ||
+        !DI5Finite(p_hi)  || !DI5Finite(a_hi)) {
+        return Set::Scalar(0.0);
+    }
+
+    // First-order state is assumed admissible by construction from VariableBuffer
+    Set::Scalar theta = Set::Scalar(1.0);
+
+    // Enforce linear constraints first
+    theta = amrex::min(theta, DI5ThetaForLowerBound(m1_hi, m1_lo, eps_m));
+    theta = amrex::min(theta, DI5ThetaForLowerBound(m2_hi, m2_lo, eps_m));
+    theta = amrex::min(theta, DI5ThetaForLowerBound(a_hi,  a_lo,  eps_a));
+    theta = amrex::min(theta, DI5ThetaForUpperBound(a_hi,  a_lo,  Set::Scalar(1.0) - eps_a));
+
+    if (theta <= Set::Scalar(0.0)) return Set::Scalar(0.0);
+
+    // If thermo is already fine at this theta, keep it
+    if (DI5AdmissibleAtTheta(theta,
+                             m1_hi,m2_hi,u_hi,v_hi,w_hi,p_hi,a_hi,
+                             m1_lo,m2_lo,u_lo,v_lo,w_lo,p_lo,a_lo,
+                             mixture_model)) {
+        return theta;
+    }
+
+    // Otherwise do bisection on [0, theta] for the largest admissible theta
+    Set::Scalar lo = Set::Scalar(0.0);
+    Set::Scalar hi = theta;
+
+    for (int it = 0; it < 24; ++it) {
+        const Set::Scalar mid = Set::Scalar(0.5) * (lo + hi);
+
+        if (DI5AdmissibleAtTheta(mid,
+                                 m1_hi,m2_hi,u_hi,v_hi,w_hi,p_hi,a_hi,
+                                 m1_lo,m2_lo,u_lo,v_lo,w_lo,p_lo,a_lo,
+                                 mixture_model)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    return lo;
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+void DI5ApplyThetaLimit(
+    Set::Scalar& m1, Set::Scalar& m2,
+    Set::Scalar& u,  Set::Scalar& v,  Set::Scalar& w,
+    Set::Scalar& p,  Set::Scalar& a,
+    Set::Scalar theta,
+    Set::Scalar m1_lo, Set::Scalar m2_lo,
+    Set::Scalar u_lo,  Set::Scalar v_lo,  Set::Scalar w_lo,
+    Set::Scalar p_lo,  Set::Scalar a_lo)
+{
+    if (theta >= Set::Scalar(1.0)) return;
+
+    m1 = DI5Blend(theta, m1, m1_lo);
+    m2 = DI5Blend(theta, m2, m2_lo);
+    u  = DI5Blend(theta, u,  u_lo);
+    v  = DI5Blend(theta, v,  v_lo);
+    w  = DI5Blend(theta, w,  w_lo);
+    p  = DI5Blend(theta, p,  p_lo);
+    a  = DI5Blend(theta, a,  a_lo);
+}
+
+// ======================= end DI5 positivity helpers =======================
 
 // Base class for flux reconstruction
 template <typename IntegratorDerivedClass>
@@ -257,6 +463,172 @@ void FluxHandler<IntegratorDerivedClass>::ProcessVariableBasedReconstruction(
             variable_accessor,
             (mode == ReconstructionMode::Characteristic) ? &AverageStateBuffer : nullptr);
 
+        // 5b. DI5 positivity limiter:
+    // apply ONLY when reconstructed face state violates the admissible set.
+    // Otherwise leave the high-order reconstructed state untouched.
+    if (solver->fluid_mixture != nullptr) {
+        const auto* mixture_model = solver->fluid_mixture.get();
+
+        const int m1_idx    = solver->variableIndex.M1;
+        const int m2_idx    = solver->variableIndex.M2;
+        const int momx_idx  = solver->variableIndex.MOMX;
+        const int momy_idx  = solver->variableIndex.MOMY;
+        const int momz_idx  = solver->variableIndex.MOMZ;
+        const int p_idx     = solver->variableIndex.ETOT;   // pressure slot in reconstruction buffer
+        const int alpha_idx = solver->variableIndex.ALPHA;
+
+        for (amrex::MFIter mfi(LeftStates, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const amrex::Box& bx_with_ghosts = mfi.grownnodaltilebox(direction, ghost_cells);
+
+            auto const& Var_arr         = VariableBuffer.array(mfi);
+            auto const& LeftStates_arr  = LeftStates.array(mfi);
+            auto const& RightStates_arr = RightStates.array(mfi);
+
+            amrex::ParallelFor(bx_with_ghosts, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                int index[3];
+                int left_index[3];
+                int right_index[3];
+                int lower_bounds[3];
+                int upper_bounds[3];
+
+                index[0] = i; index[1] = j; index[2] = k;
+                left_index[0] = i; left_index[1] = j; left_index[2] = k;
+                right_index[0] = i; right_index[1] = j; right_index[2] = k;
+
+                lower_bounds[0] = bx_with_ghosts.smallEnd(0);
+                lower_bounds[1] = bx_with_ghosts.smallEnd(1);
+                lower_bounds[2] = (AMREX_SPACEDIM == 3) ? bx_with_ghosts.smallEnd(2) : 0;
+
+                upper_bounds[0] = bx_with_ghosts.bigEnd(0) - 1;
+                upper_bounds[1] = bx_with_ghosts.bigEnd(1) - 1;
+                upper_bounds[2] = (AMREX_SPACEDIM == 3) ? bx_with_ghosts.bigEnd(2) - 1 : 0;
+
+                ClampIndices(index, lower_bounds, upper_bounds);
+
+                int left_offset[3]  = {0, 0, 0};
+                int right_offset[3] = {0, 0, 0};
+                left_offset[direction]  = 0;
+                right_offset[direction] = 1;
+
+                ShiftAndClampIndices(left_index,  left_offset,  lower_bounds, upper_bounds, direction);
+                ShiftAndClampIndices(right_index, right_offset, lower_bounds, upper_bounds, direction);
+
+                // ---------------- Left face state ----------------
+                Set::Scalar Lm1 = LeftStates_arr(index[0], index[1], index[2], m1_idx);
+                Set::Scalar Lm2 = LeftStates_arr(index[0], index[1], index[2], m2_idx);
+                Set::Scalar Lu  = LeftStates_arr(index[0], index[1], index[2], momx_idx);
+#if (AMREX_SPACEDIM >= 2)
+                Set::Scalar Lv  = LeftStates_arr(index[0], index[1], index[2], momy_idx);
+#else
+                Set::Scalar Lv  = Set::Scalar(0.0);
+#endif
+#if (AMREX_SPACEDIM == 3)
+                Set::Scalar Lw  = LeftStates_arr(index[0], index[1], index[2], momz_idx);
+#else
+                Set::Scalar Lw  = Set::Scalar(0.0);
+#endif
+                Set::Scalar Lp  = LeftStates_arr(index[0], index[1], index[2], p_idx);
+                Set::Scalar La  = LeftStates_arr(index[0], index[1], index[2], alpha_idx);
+
+                const Set::Scalar Lm1_lo = Var_arr(left_index[0], left_index[1], left_index[2], m1_idx);
+                const Set::Scalar Lm2_lo = Var_arr(left_index[0], left_index[1], left_index[2], m2_idx);
+                const Set::Scalar Lu_lo  = Var_arr(left_index[0], left_index[1], left_index[2], momx_idx);
+#if (AMREX_SPACEDIM >= 2)
+                const Set::Scalar Lv_lo  = Var_arr(left_index[0], left_index[1], left_index[2], momy_idx);
+#else
+                const Set::Scalar Lv_lo  = Set::Scalar(0.0);
+#endif
+#if (AMREX_SPACEDIM == 3)
+                const Set::Scalar Lw_lo  = Var_arr(left_index[0], left_index[1], left_index[2], momz_idx);
+#else
+                const Set::Scalar Lw_lo  = Set::Scalar(0.0);
+#endif
+                const Set::Scalar Lp_lo  = Var_arr(left_index[0], left_index[1], left_index[2], p_idx);
+                const Set::Scalar La_lo  = Var_arr(left_index[0], left_index[1], left_index[2], alpha_idx);
+
+                const Set::Scalar thetaL = DI5ComputeTheta(
+                    Lm1, Lm2, Lu, Lv, Lw, Lp, La,
+                    Lm1_lo, Lm2_lo, Lu_lo, Lv_lo, Lw_lo, Lp_lo, La_lo,
+                    mixture_model
+                );
+
+                DI5ApplyThetaLimit(
+                    Lm1, Lm2, Lu, Lv, Lw, Lp, La,
+                    thetaL,
+                    Lm1_lo, Lm2_lo, Lu_lo, Lv_lo, Lw_lo, Lp_lo, La_lo
+                );
+
+                LeftStates_arr(index[0], index[1], index[2], m1_idx)    = Lm1;
+                LeftStates_arr(index[0], index[1], index[2], m2_idx)    = Lm2;
+                LeftStates_arr(index[0], index[1], index[2], momx_idx)  = Lu;
+#if (AMREX_SPACEDIM >= 2)
+                LeftStates_arr(index[0], index[1], index[2], momy_idx)  = Lv;
+#endif
+#if (AMREX_SPACEDIM == 3)
+                LeftStates_arr(index[0], index[1], index[2], momz_idx)  = Lw;
+#endif
+                LeftStates_arr(index[0], index[1], index[2], p_idx)     = Lp;
+                LeftStates_arr(index[0], index[1], index[2], alpha_idx) = La;
+
+                // ---------------- Right face state ----------------
+                Set::Scalar Rm1 = RightStates_arr(index[0], index[1], index[2], m1_idx);
+                Set::Scalar Rm2 = RightStates_arr(index[0], index[1], index[2], m2_idx);
+                Set::Scalar Ru  = RightStates_arr(index[0], index[1], index[2], momx_idx);
+#if (AMREX_SPACEDIM >= 2)
+                Set::Scalar Rv  = RightStates_arr(index[0], index[1], index[2], momy_idx);
+#else
+                Set::Scalar Rv  = Set::Scalar(0.0);
+#endif
+#if (AMREX_SPACEDIM == 3)
+                Set::Scalar Rw  = RightStates_arr(index[0], index[1], index[2], momz_idx);
+#else
+                Set::Scalar Rw  = Set::Scalar(0.0);
+#endif
+                Set::Scalar Rp  = RightStates_arr(index[0], index[1], index[2], p_idx);
+                Set::Scalar Ra  = RightStates_arr(index[0], index[1], index[2], alpha_idx);
+
+                const Set::Scalar Rm1_lo = Var_arr(right_index[0], right_index[1], right_index[2], m1_idx);
+                const Set::Scalar Rm2_lo = Var_arr(right_index[0], right_index[1], right_index[2], m2_idx);
+                const Set::Scalar Ru_lo  = Var_arr(right_index[0], right_index[1], right_index[2], momx_idx);
+#if (AMREX_SPACEDIM >= 2)
+                const Set::Scalar Rv_lo  = Var_arr(right_index[0], right_index[1], right_index[2], momy_idx);
+#else
+                const Set::Scalar Rv_lo  = Set::Scalar(0.0);
+#endif
+#if (AMREX_SPACEDIM == 3)
+                const Set::Scalar Rw_lo  = Var_arr(right_index[0], right_index[1], right_index[2], momz_idx);
+#else
+                const Set::Scalar Rw_lo  = Set::Scalar(0.0);
+#endif
+                const Set::Scalar Rp_lo  = Var_arr(right_index[0], right_index[1], right_index[2], p_idx);
+                const Set::Scalar Ra_lo  = Var_arr(right_index[0], right_index[1], right_index[2], alpha_idx);
+
+                const Set::Scalar thetaR = DI5ComputeTheta(
+                    Rm1, Rm2, Ru, Rv, Rw, Rp, Ra,
+                    Rm1_lo, Rm2_lo, Ru_lo, Rv_lo, Rw_lo, Rp_lo, Ra_lo,
+                    mixture_model
+                );
+
+                DI5ApplyThetaLimit(
+                    Rm1, Rm2, Ru, Rv, Rw, Rp, Ra,
+                    thetaR,
+                    Rm1_lo, Rm2_lo, Ru_lo, Rv_lo, Rw_lo, Rp_lo, Ra_lo
+                );
+
+                RightStates_arr(index[0], index[1], index[2], m1_idx)    = Rm1;
+                RightStates_arr(index[0], index[1], index[2], m2_idx)    = Rm2;
+                RightStates_arr(index[0], index[1], index[2], momx_idx)  = Ru;
+#if (AMREX_SPACEDIM >= 2)
+                RightStates_arr(index[0], index[1], index[2], momy_idx)  = Rv;
+#endif
+#if (AMREX_SPACEDIM == 3)
+                RightStates_arr(index[0], index[1], index[2], momz_idx)  = Rw;
+#endif
+                RightStates_arr(index[0], index[1], index[2], p_idx)     = Rp;
+                RightStates_arr(index[0], index[1], index[2], alpha_idx) = Ra;
+            });
+        }
+    }
 
     // 6. Create MultiFab for the computed flux
     amrex::MultiFab SummedFlux(face_ba, solver->dmap[lev], 
@@ -803,7 +1175,7 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
                 const Set::Scalar w_L       = 0.0;
 #endif
                 const Set::Scalar p_L  = Left_arr(i, j, k, etot_idx);
-                const Set::Scalar alpha_L   = amrex::min(amrex::max(Left_arr(i, j, k, alpha_idx), 0.0), 1.0); // Clip alpha
+                const Set::Scalar alpha_L = Left_arr(i, j, k, alpha_idx);
                 const Set::Scalar rho_L = m1_L + m2_L;
 
                 const Set::Scalar vel_L_normal = Left_arr(i, j, k, momx_idx + normal);
@@ -828,7 +1200,7 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
                 const Set::Scalar w_R       = 0.0;
 #endif
                 const Set::Scalar p_R  = Right_arr(i, j, k, etot_idx);
-                const Set::Scalar alpha_R   = amrex::min(amrex::max(Right_arr(i, j, k, alpha_idx), 0.0), 1.0); // Clip alpha
+                const Set::Scalar alpha_R = Right_arr(i, j, k, alpha_idx);
                 const Set::Scalar rho_R = m1_R + m2_R;
                 
                 const Set::Scalar vel_R_normal = Right_arr(i, j, k, momx_idx + normal);
