@@ -5,6 +5,8 @@
 #include "Util/ScimitarX_Util.H"
 #include "Numeric/IntegratorVariableAccessLayer.H"
 #include "Model/Fluid/Fluid.H"
+
+#include "Model/Fluid/FiveEquation.H" 
 #include "IO/ParmParse.H"
 #include "AMReX_Parser.H"
 
@@ -52,10 +54,28 @@ void Shock::AddConstant(const int& lev, Set::Field<Set::Scalar>& a_phi, Set::Sca
 #endif
         int ie_idx = requires_variable_indices ? variable_indices->IE : -1;
 
+        // --- ADDITION: 5-Eq Indices ---
+        int m1_idx = requires_variable_indices ? variable_indices->M1 : -1;
+        int m2_idx = requires_variable_indices ? variable_indices->M2 : -1;
+        int momx_idx = requires_variable_indices ? variable_indices->MOMX : -1;
+        int momy_idx = requires_variable_indices ? variable_indices->MOMY : -1;
+        int momz_idx = requires_variable_indices ? variable_indices->MOMZ : -1;
+        int etot_idx = requires_variable_indices ? variable_indices->ETOT : -1;
+        int alpha_idx = requires_variable_indices ? variable_indices->ALPHA : -1;
+        // --- END ADDITION ---
+
+
         Model::Fluid::Fluid fluid_model;
         Util::ScimitarX_Util::Debug debug;
 
-        Set::Scalar gamma = 1.4;
+        Set::Scalar gamma = 1.4; // Used for Euler IC
+        // --- ADDITION: Dummy gammas for 5-eq IC ---
+        // These are only used to calculate ie_mix from p and rho.
+        // The real gammas are in the FluidMixture object in ScimitarX.
+        Set::Scalar gamma1 = 1.4; 
+        Set::Scalar gamma2 = 1.4;
+        // --- END ADDITION ---
+
 
         //Use the pre-computed direction index for efficiency
         int dir_idx = direction_index;
@@ -71,32 +91,64 @@ void Shock::AddConstant(const int& lev, Set::Field<Set::Scalar>& a_phi, Set::Sca
                     if (x(dir_idx) >= zone_lower_bounds[idx] && x(dir_idx) < zone_upper_bounds[idx]) {
 
                         if (mf_name == "ic.shock.pvec") {
-                            if (n == dens_idx) {
-                                phi(i, j, k, n) = density_zone[idx];
-                               
-                            }
-                            else if (n == uvel_idx)
-                                phi(i, j, k, n) = uvel_zone[idx];
+                            
+                            // --- MODIFICATION: Check if 5-eq or Euler ---
+                            if (alpha_idx != -1) {
+                                // --- 5-EQUATION MODEL PRIMITIVE MAPPING ---
+                                // PVec is [rho, p, u, v, w, ie_mix, alpha]
+                                if (n == m1_idx) {            // rho1
+                                    phi(i, j, k, n) = rho1_zone[idx];
+                                } else if (n == m2_idx) {     // rho2
+                                    phi(i, j, k, n) = rho2_zone[idx];
+                                } else if (n == momx_idx) { // Slot 2: u
+                                    phi(i, j, k, n) = uvel_zone[idx];
 #if AMREX_SPACEDIM >= 2
-                            else if (n == vvel_idx)
-                                phi(i, j, k, n) = vvel_zone[idx];
+                                } else if (n == momy_idx) { // Slot 3: v
+                                    phi(i, j, k, n) = vvel_zone[idx];
 #endif
 #if AMREX_SPACEDIM == 3
-                            else if (n == wvel_idx)
-                                phi(i, j, k, n) = wvel_zone[idx];
+                                } else if (n == momz_idx) { // Slot 4: w
+                                    phi(i, j, k, n) = wvel_zone[idx];
 #endif
-                            else if (n == ie_idx) {
-                                Set::Scalar tmp_density = density_zone[idx];
-                                Set::Scalar tmp_pressure = pressure_zone[idx];
+                                } else if (n == etot_idx) { // Slot 5: ie_mix
+                                    
+                                    phi(i, j, k, n) = 0;
+                                
+                                } else if (n == alpha_idx) { // Slot 6: alpha
+                                    phi(i, j, k, n) = alpha_zone[idx];
+                                }
 
-                                phi(i, j, k, n) = fluid_model.ComputeInternalEnergyFromDensityAndPressure(
-                                    tmp_density, tmp_pressure, gamma);
+                            } else {
+                                // --- ORIGINAL EULER MODEL LOGIC ---
+                                if (n == dens_idx) {
+                                    phi(i, j, k, n) = density_zone[idx];
+                                
+                                }
+                                else if (n == uvel_idx)
+                                    phi(i, j, k, n) = uvel_zone[idx];
+#if AMREX_SPACEDIM >= 2
+                                else if (n == vvel_idx)
+                                    phi(i, j, k, n) = vvel_zone[idx];
+#endif
+#if AMREX_SPACEDIM == 3
+                                else if (n == wvel_idx)
+                                    phi(i, j, k, n) = wvel_zone[idx];
+#endif
+                                else if (n == ie_idx) {
+                                    Set::Scalar tmp_density = density_zone[idx];
+                                    Set::Scalar tmp_pressure = pressure_zone[idx];
 
-                                if (phi(i, j, k, n) == 0.0)
-                                    debug.DebugComputeInternalEnergyFromDensityAndPressure(
-                                        i, j, k, lev, tmp_density, tmp_pressure,
-                                        gamma, true, "print", "Zone " + std::to_string(idx));
+                                    phi(i, j, k, n) = fluid_model.ComputeInternalEnergyFromDensityAndPressure(
+                                        tmp_density, tmp_pressure, gamma);
+
+                                    if (phi(i, j, k, n) == 0.0)
+                                        debug.DebugComputeInternalEnergyFromDensityAndPressure(
+                                            i, j, k, lev, tmp_density, tmp_pressure,
+                                            gamma, true, "print", "Zone " + std::to_string(idx));
+                                }
                             }
+                            // --- END MODIFICATION ---
+
                         } else if (mf_name == "ic.shock.pressure") {
                             phi(i, j, k, n) = pressure_zone[idx];
                         }
@@ -129,8 +181,24 @@ void Shock::AddExpression(const int& lev, Set::Field<Set::Scalar>& a_phi, Set::S
 #endif
         int ie_idx = requires_variable_indices ? variable_indices->IE : -1;
 
+        // --- ADDITION: 5-Eq Indices ---
+        int m1_idx = requires_variable_indices ? variable_indices->M1 : -1;
+        int m2_idx = requires_variable_indices ? variable_indices->M2 : -1;
+        int momx_idx = requires_variable_indices ? variable_indices->MOMX : -1;
+        int momy_idx = requires_variable_indices ? variable_indices->MOMY : -1;
+        int momz_idx = requires_variable_indices ? variable_indices->MOMZ : -1;
+        int etot_idx = requires_variable_indices ? variable_indices->ETOT : -1;
+        int alpha_idx = requires_variable_indices ? variable_indices->ALPHA : -1;
+        // --- END ADDITION ---
+
+
         Model::Fluid::Fluid fluid_model;
         Set::Scalar gamma = 1.4;
+        // --- ADDITION: Dummy gammas for 5-eq IC ---
+        Set::Scalar gamma1 = 1.666667; 
+        Set::Scalar gamma2 = 1.4;
+        // --- END ADDITION ---
+
 
         // Use the pre-computed direction index for efficiency
         int dir_idx = direction_index;
@@ -143,54 +211,127 @@ void Shock::AddExpression(const int& lev, Set::Field<Set::Scalar>& a_phi, Set::S
                 for (std::size_t idx = 0; idx < num_zones; ++idx) {
                     if (x(dir_idx) >= zone_lower_bounds[idx] && x(dir_idx) < zone_upper_bounds[idx]) {
                         if (mf_name == "ic.shock.pvec") {
-                            if (n == dens_idx) {
-                                #if AMREX_SPACEDIM == 1
-                                phi(i, j, k, n) = density_func[idx](x(0), 0.0, 0.0, time);
-                                #elif AMREX_SPACEDIM == 2
-                                phi(i, j, k, n) = density_func[idx](x(0), x(1), 0.0, time);
-                                #elif AMREX_SPACEDIM == 3
-                                phi(i, j, k, n) = density_func[idx](x(0), x(1), x(2), time);
-                                #endif
-                            }
-                            else if (n == uvel_idx) {
-                                #if AMREX_SPACEDIM == 1
-                                phi(i, j, k, n) = uvel_func[idx](x(0), 0.0, 0.0, time);
-                                #elif AMREX_SPACEDIM == 2
-                                phi(i, j, k, n) = uvel_func[idx](x(0), x(1), 0.0, time);
-                                #elif AMREX_SPACEDIM == 3
-                                phi(i, j, k, n) = uvel_func[idx](x(0), x(1), x(2), time);
-                                #endif
-                            }
+
+                            // --- MODIFICATION: Check if 5-eq or Euler ---
+                            if (alpha_idx != -1) {
+                                // --- 5-EQUATION MODEL PRIMITIVE MAPPING ---
+                                // PVec is [rho, p, u, v, w, ie_mix, alpha]
+                                if (n == m1_idx) {         // Slot 0: rho
+                                    #if AMREX_SPACEDIM == 1
+                                    phi(i, j, k, n) = density_func[idx](x(0), 0.0, 0.0, time);
+                                    #elif AMREX_SPACEDIM == 2
+                                    phi(i, j, k, n) = density_func[idx](x(0), x(1), 0.0, time);
+                                    #elif AMREX_SPACEDIM == 3
+                                    phi(i, j, k, n) = density_func[idx](x(0), x(1), x(2), time);
+                                    #endif
+                                } else if (n == m2_idx) {  // Slot 1: p
+                                    #if AMREX_SPACEDIM == 1
+                                    phi(i, j, k, n) = pressure_func[idx](x(0), 0.0, 0.0, time);
+                                    #elif AMREX_SPACEDIM == 2
+                                    phi(i, j, k, n) = pressure_func[idx](x(0), x(1), 0.0, time);
+                                    #elif AMREX_SPACEDIM == 3
+                                    phi(i, j, k, n) = pressure_func[idx](x(0), x(1), x(2), time);
+                                    #endif
+                                } else if (n == momx_idx) { // Slot 2: u
+                                    #if AMREX_SPACEDIM == 1
+                                    phi(i, j, k, n) = uvel_func[idx](x(0), 0.0, 0.0, time);
+                                    #elif AMREX_SPACEDIM == 2
+                                    phi(i, j, k, n) = uvel_func[idx](x(0), x(1), 0.0, time);
+                                    #elif AMREX_SPACEDIM == 3
+                                    phi(i, j, k, n) = uvel_func[idx](x(0), x(1), x(2), time);
+                                    #endif
 #if AMREX_SPACEDIM >= 2
-                            else if (n == vvel_idx) {
-                                #if AMREX_SPACEDIM == 2
-                                phi(i, j, k, n) = vvel_func[idx](x(0), x(1), 0.0, time);
-                                #elif AMREX_SPACEDIM == 3
-                                phi(i, j, k, n) = vvel_func[idx](x(0), x(1), x(2), time);
-                                #endif
-                            }
+                                } else if (n == momy_idx) { // Slot 3: v
+                                    #if AMREX_SPACEDIM == 2
+                                    phi(i, j, k, n) = vvel_func[idx](x(0), x(1), 0.0, time);
+                                    #elif AMREX_SPACEDIM == 3
+                                    phi(i, j, k, n) = vvel_func[idx](x(0), x(1), x(2), time);
+                                    #endif
 #endif
 #if AMREX_SPACEDIM == 3
-                            else if (n == wvel_idx) {
-                                phi(i, j, k, n) = wvel_func[idx](x(0), x(1), x(2), time);
-                            }
+                                } else if (n == momz_idx) { // Slot 4: w
+                                    phi(i, j, k, n) = wvel_func[idx](x(0), x(1), x(2), time);
 #endif
-                            else if (n == ie_idx) {
-                                // For internal energy, compute from pressure and density
-                                #if AMREX_SPACEDIM == 1
-                                Set::Scalar tmp_density = density_func[idx](x(0), 0.0, 0.0, time);
-                                Set::Scalar tmp_pressure = pressure_func[idx](x(0), 0.0, 0.0, time);
-                                #elif AMREX_SPACEDIM == 2
-                                Set::Scalar tmp_density = density_func[idx](x(0), x(1), 0.0, time);
-                                Set::Scalar tmp_pressure = pressure_func[idx](x(0), x(1), 0.0, time);
-                                #elif AMREX_SPACEDIM == 3
-                                Set::Scalar tmp_density = density_func[idx](x(0), x(1), x(2), time);
-                                Set::Scalar tmp_pressure = pressure_func[idx](x(0), x(1), x(2), time);
-                                #endif
+                                } else if (n == etot_idx) { // Slot 5: ie_mix
+                                    #if AMREX_SPACEDIM == 1
+                                    Set::Scalar tmp_density = density_func[idx](x(0), 0.0, 0.0, time);
+                                    Set::Scalar tmp_pressure = pressure_func[idx](x(0), 0.0, 0.0, time);
+                                    Set::Scalar tmp_alpha = alpha_func[idx](x(0), 0.0, 0.0, time);
+                                    #elif AMREX_SPACEDIM == 2
+                                    Set::Scalar tmp_density = density_func[idx](x(0), x(1), 0.0, time);
+                                    Set::Scalar tmp_pressure = pressure_func[idx](x(0), x(1), 0.0, time);
+                                    Set::Scalar tmp_alpha = alpha_func[idx](x(0), x(1), 0.0, time);
+                                    #elif AMREX_SPACEDIM == 3
+                                    Set::Scalar tmp_density = density_func[idx](x(0), x(1), x(2), time);
+                                    Set::Scalar tmp_pressure = pressure_func[idx](x(0), x(1), x(2), time);
+                                    Set::Scalar tmp_alpha = alpha_func[idx](x(0), x(1), x(2), time);
+                                    #endif
 
-                                phi(i, j, k, n) = fluid_model.ComputeInternalEnergyFromDensityAndPressure(
-                                    tmp_density, tmp_pressure, gamma);
+                                    Set::Scalar A = tmp_alpha / (gamma1 - 1.0) + (1.0 - tmp_alpha) / (gamma2 - 1.0);
+                                    phi(i, j, k, n) = tmp_pressure * A / amrex::max(tmp_density, 1e-12);
+
+                                } else if (n == alpha_idx) { // Slot 6: alpha
+                                    #if AMREX_SPACEDIM == 1
+                                    phi(i, j, k, n) = alpha_func[idx](x(0), 0.0, 0.0, time);
+                                    #elif AMREX_SPACEDIM == 2
+                                    phi(i, j, k, n) = alpha_func[idx](x(0), x(1), 0.0, time);
+                                    #elif AMREX_SPACEDIM == 3
+                                    phi(i, j, k, n) = alpha_func[idx](x(0), x(1), x(2), time);
+                                    #endif
+                                }
+                            } else {
+                                // --- ORIGINAL EULER MODEL LOGIC ---
+                                if (n == dens_idx) {
+                                    #if AMREX_SPACEDIM == 1
+                                    phi(i, j, k, n) = density_func[idx](x(0), 0.0, 0.0, time);
+                                    #elif AMREX_SPACEDIM == 2
+                                    phi(i, j, k, n) = density_func[idx](x(0), x(1), 0.0, time);
+                                    #elif AMREX_SPACEDIM == 3
+                                    phi(i, j, k, n) = density_func[idx](x(0), x(1), x(2), time);
+                                    #endif
+                                }
+                                else if (n == uvel_idx) {
+                                    #if AMREX_SPACEDIM == 1
+                                    phi(i, j, k, n) = uvel_func[idx](x(0), 0.0, 0.0, time);
+                                    #elif AMREX_SPACEDIM == 2
+                                    phi(i, j, k, n) = uvel_func[idx](x(0), x(1), 0.0, time);
+                                    #elif AMREX_SPACEDIM == 3
+                                    phi(i, j, k, n) = uvel_func[idx](x(0), x(1), x(2), time);
+                                    #endif
+                                }
+#if AMREX_SPACEDIM >= 2
+                                else if (n == vvel_idx) {
+                                    #if AMREX_SPACEDIM == 2
+                                    phi(i, j, k, n) = vvel_func[idx](x(0), x(1), 0.0, time);
+                                    #elif AMREX_SPACEDIM == 3
+                                    phi(i, j, k, n) = vvel_func[idx](x(0), x(1), x(2), time);
+                                    #endif
+                                }
+#endif
+#if AMREX_SPACEDIM == 3
+                                else if (n == wvel_idx) {
+                                    phi(i, j, k, n) = wvel_func[idx](x(0), x(1), x(2), time);
+                                }
+#endif
+                                else if (n == ie_idx) {
+                                    // For internal energy, compute from pressure and density
+                                    #if AMREX_SPACEDIM == 1
+                                    Set::Scalar tmp_density = density_func[idx](x(0), 0.0, 0.0, time);
+                                    Set::Scalar tmp_pressure = pressure_func[idx](x(0), 0.0, 0.0, time);
+                                    #elif AMREX_SPACEDIM == 2
+                                    Set::Scalar tmp_density = density_func[idx](x(0), x(1), 0.0, time);
+                                    Set::Scalar tmp_pressure = pressure_func[idx](x(0), x(1), 0.0, time);
+                                    #elif AMREX_SPACEDIM == 3
+                                    Set::Scalar tmp_density = density_func[idx](x(0), x(1), x(2), time);
+                                    Set::Scalar tmp_pressure = pressure_func[idx](x(0), x(1), x(2), time);
+                                    #endif
+
+                                    phi(i, j, k, n) = fluid_model.ComputeInternalEnergyFromDensityAndPressure(
+                                        tmp_density, tmp_pressure, gamma);
+                                }
                             }
+                            // --- END MODIFICATION ---
+
                         } else if (mf_name == "ic.shock.pressure") {
                             #if AMREX_SPACEDIM == 1
                             phi(i, j, k, n) = pressure_func[idx](x(0), 0.0, 0.0, time);
@@ -353,8 +494,12 @@ void Shock::initialize(IO::ParmParse& pp, const std::string& name) {
             pp.queryarr("ic.shock.expressions.pvec.wvel", wvel_expr); // W-velocity expressions for all zones
 #endif
             pp.queryarr("ic.shock.expressions.pressure", pressure_expr); // pressure expressions for all zones
+            // --- ADDITION ---
+            pp.queryarr("ic.shock.expressions.pvec.alpha", alpha_expr); // alpha expressions for all zones
+
 
             // Validate array sizes
+            // --- MODIFICATION: Added alpha_expr check ---
             if (density_expr.size() != num_zones ||
                 uvel_expr.size() != num_zones ||
 #if AMREX_SPACEDIM >= 2
@@ -363,6 +508,7 @@ void Shock::initialize(IO::ParmParse& pp, const std::string& name) {
 #if AMREX_SPACEDIM == 3
                 wvel_expr.size() != num_zones ||
 #endif
+                (alpha_expr.size() != num_zones && requires_variable_indices && variable_indices->ALPHA != -1) || // Only check if 5eq
                 pressure_expr.size() != num_zones) {
                 Util::Abort(INFO, "Expression arrays have incorrect size for ic.shock.pvec expressions");
             }
@@ -377,6 +523,10 @@ void Shock::initialize(IO::ParmParse& pp, const std::string& name) {
             SetupParser(wvel_parser, wvel_func, wvel_expr, constants);
 #endif
             SetupParser(pressure_parser, pressure_func, pressure_expr, constants);
+            // --- ADDITION ---
+            if (alpha_expr.size() > 0)
+                SetupParser(alpha_parser, alpha_func, alpha_expr, constants);
+
 
             // Log the expressions for debugging
             Util::Message(INFO, "DEBUG: Parsed ic.shock.pvec expressions:");
@@ -393,47 +543,72 @@ void Shock::initialize(IO::ParmParse& pp, const std::string& name) {
                 Util::Message(INFO, "  w expression = " + wvel_expr[i]);
 #endif
                 Util::Message(INFO, "  Pressure expression = " + pressure_expr[i]);
+                // --- ADDITION ---
+                if (alpha_expr.size() > i)
+                    Util::Message(INFO, "  alpha expression = " + alpha_expr[i]);
             }
         } else {
+
             // Original implementation - read arrays of constant values
-            pp.queryarr("ic.shock.pvec.density", density_zone);  // density values for all zones
-            pp.queryarr("ic.shock.pvec.uvel", uvel_zone);  // U-velocity values for all zones
+pp.queryarr("ic.shock.pvec.uvel", uvel_zone);
 #if AMREX_SPACEDIM >= 2
-            pp.queryarr("ic.shock.pvec.vvel", vvel_zone); // V-velocity values for all zones
+pp.queryarr("ic.shock.pvec.vvel", vvel_zone);
 #endif
 #if AMREX_SPACEDIM == 3
-            pp.queryarr("ic.shock.pvec.wvel", wvel_zone); // W-velocity values for all zones
+pp.queryarr("ic.shock.pvec.wvel", wvel_zone);
 #endif
-            pp.queryarr("ic.shock.pressure", pressure_zone); // Pressure values for all zones
 
-            // Ensure all zone arrays have the correct size
-            if (density_zone.size() != num_zones ||
-                uvel_zone.size() != num_zones ||
-#if AMREX_SPACEDIM >= 2
-                vvel_zone.size() != num_zones ||
-#endif
-#if AMREX_SPACEDIM == 3
-                wvel_zone.size() != num_zones ||
-#endif
-                pressure_zone.size() != num_zones) {
-                Util::Abort(INFO, "Zone arrays have incorrect size for ic.shock.pvec");
-            }
+pp.queryarr("ic.shock.pressure", pressure_zone);
 
-            Util::Message(INFO, "DEBUG: Parsed ic.shock.pvec values:");
-            for (size_t i = 0; i < num_zones; ++i) {
-                Set::Scalar lower = (i == 0) ? domain_min[direction_index] : shock_positions[i - 1];
-                Set::Scalar upper = (i == shock_positions.size()) ? domain_max[direction_index] : shock_positions[i];
-                Util::Message(INFO, "  Zone[" + std::to_string(i) + "]: from " + std::to_string(lower) + " to " + std::to_string(upper));
-                Util::Message(INFO, "    Density = " + std::to_string(density_zone[i]));
-                Util::Message(INFO, "    u = " + std::to_string(uvel_zone[i]));
+// Detect 5-eq by presence of ALPHA index (or M1/M2/ETOT indices)
+const bool is_fiveeq =
+    (requires_variable_indices && variable_indices && variable_indices->ALPHA != -1);
+
+if (is_fiveeq) {
+    pp.queryarr("ic.shock.pvec.rho1",  rho1_zone);
+    pp.queryarr("ic.shock.pvec.rho2",  rho2_zone);
+    pp.queryarr("ic.shock.pvec.alpha", alpha_zone);
+
+    if (rho1_zone.size() != num_zones ||
+        rho2_zone.size() != num_zones ||
+        alpha_zone.size() != num_zones ||
+        uvel_zone.size() != num_zones ||
 #if AMREX_SPACEDIM >= 2
-                Util::Message(INFO, "    v = " + std::to_string(vvel_zone[i]));
+        vvel_zone.size() != num_zones ||
 #endif
 #if AMREX_SPACEDIM == 3
-                Util::Message(INFO, "    w = " + std::to_string(wvel_zone[i]));
+        wvel_zone.size() != num_zones ||
 #endif
-                Util::Message(INFO, "    Pressure = " + std::to_string(pressure_zone[i]));
-            }
+        pressure_zone.size() != num_zones) {
+        Util::Abort(INFO, "Zone arrays have incorrect size for ic.shock.pvec (FiveEquation: rho1/rho2/alpha)");
+    }
+
+    Util::Message(INFO, "DEBUG: Parsed ic.shock.pvec (FiveEquation) values:");
+    for (size_t i = 0; i < num_zones; ++i) {
+        Util::Message(INFO, "  Zone[" + std::to_string(i) + "] rho1=" + std::to_string(rho1_zone[i]) +
+                            " rho2=" + std::to_string(rho2_zone[i]) +
+                            " alpha=" + std::to_string(alpha_zone[i]) +
+                            " u=" + std::to_string(uvel_zone[i]));
+    }
+
+} else {
+    // Euler: keep old density input
+    pp.queryarr("ic.shock.pvec.density", density_zone);
+
+    if (density_zone.size() != num_zones ||
+        uvel_zone.size() != num_zones ||
+#if AMREX_SPACEDIM >= 2
+        vvel_zone.size() != num_zones ||
+#endif
+#if AMREX_SPACEDIM == 3
+        wvel_zone.size() != num_zones ||
+#endif
+        pressure_zone.size() != num_zones) {
+        Util::Abort(INFO, "Zone arrays have incorrect size for ic.shock.pvec (Euler)");
+    }
+}
+
+            
         }
     } else if (mf_name == "ic.shock.pressure") {
         if (use_expressions) {
