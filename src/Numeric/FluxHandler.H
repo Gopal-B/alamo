@@ -10,6 +10,7 @@
 #include "Model/Fluid/Fluid.H" 
 #include "Numeric/Stencil.H" 
 #include "Numeric/NumericTypes.H"
+
 #include "Numeric/SolverCapabilities.H"
 #include "Numeric/IntegratorVariableAccessLayer.H"
 #include "Numeric/SymmetryPreservingRoeAveragingOperations.H"
@@ -159,6 +160,15 @@ private:
     std::shared_ptr<FluxReconstruction<IntegratorDerivedClass>> reconstruction;
     std::shared_ptr<FluxMethod<IntegratorDerivedClass>> flux_method;
     std::shared_ptr<GenericVariableAccessor> variable_accessor;
+    void ApplyPositivityLimiter_DI5(
+        int direction, int lev, IntegratorDerivedClass* solver,
+        const amrex::MultiFab& VariableBuffer,
+        amrex::MultiFab& LeftStates,
+        amrex::MultiFab& RightStates
+    ) const;
+
+
+
 
     // For variable-based reconstruction methods like HLLC
     void ProcessVariableBasedReconstruction(
@@ -169,9 +179,131 @@ private:
         int direction, int lev, IntegratorDerivedClass* solver) const;
 };
 
+
+   
+    template <typename IntegratorDerivedClass>
+void FluxHandler<IntegratorDerivedClass>::ApplyPositivityLimiter_DI5(
+    int direction, int lev, IntegratorDerivedClass* solver,
+    const amrex::MultiFab& VariableBuffer,
+    amrex::MultiFab& LeftStates,
+    amrex::MultiFab& RightStates
+) const
+{
+    // Only for DI5
+    if (solver->fluid_mixture == nullptr) return;
+
+    const int nghosts = solver->number_of_ghost_cells;
+
+    const int m1_idx    = solver->variableIndex.M1;     // rho (primitive slot)
+    const int m2_idx    = solver->variableIndex.M2;     // p   (primitive slot)
+    const int etot_idx  = solver->variableIndex.ETOT;   // ie_mix (primitive slot)
+    const int alpha_idx = solver->variableIndex.ALPHA;  // alpha
+
+    constexpr Set::Scalar rho_floor   = 1.0e-12;
+    constexpr Set::Scalar p_floor     = 1.0e-12;
+    constexpr Set::Scalar ie_floor    = 1.0e-14;
+    constexpr Set::Scalar alpha_floor = 1.0e-12;
+
+    for (amrex::MFIter mfi(LeftStates, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+
+        // face index space
+        const amrex::Box& face_bx = mfi.grownnodaltilebox(direction, nghosts);
+
+        auto const& VB  = VariableBuffer.array(mfi);   // cell-centered primitive buffer
+        auto const& UL  = LeftStates.array(mfi);       // face-centered reconstructed
+        auto const& UR  = RightStates.array(mfi);
+
+        // bounds for clamping reads from VariableBuffer
+        const amrex::Box& cell_bx = VariableBuffer.box(mfi.index());
+        const int ilo = cell_bx.smallEnd(0), ihi = cell_bx.bigEnd(0);
+        const int jlo = cell_bx.smallEnd(1), jhi = cell_bx.bigEnd(1);
+#if AMREX_SPACEDIM == 3
+        const int klo = cell_bx.smallEnd(2), khi = cell_bx.bigEnd(2);
+#else
+        const int klo = 0, khi = 0;
+#endif
+
+        amrex::ParallelFor(face_bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+
+            // Map face -> adjacent cells for 1st-order fallback
+            int iL = i, jL = j, kL = k;
+            int iR = i, jR = j, kR = k;
+
+            if (direction == FluxHandler<IntegratorDerivedClass>::Xdir) { iL = i-1; iR = i; }
+#if AMREX_SPACEDIM >= 2
+            if (direction == FluxHandler<IntegratorDerivedClass>::Ydir) { jL = j-1; jR = j; }
+#endif
+#if AMREX_SPACEDIM == 3
+            if (direction == FluxHandler<IntegratorDerivedClass>::Zdir) { kL = k-1; kR = k; }
+#endif
+
+            // Clamp cell indices into valid VariableBuffer box
+            iL = amrex::max(ilo, amrex::min(ihi, iL));
+            jL = amrex::max(jlo, amrex::min(jhi, jL));
+            kL = amrex::max(klo, amrex::min(khi, kL));
+
+            iR = amrex::max(ilo, amrex::min(ihi, iR));
+            jR = amrex::max(jlo, amrex::min(jhi, jR));
+            kR = amrex::max(klo, amrex::min(khi, kR));
+
+            auto fix_state = [&](auto const& Uface, int ic, int jc, int kc) AMREX_GPU_DEVICE {
+                // Replace face state by 1st-order (cell) state + clamp
+                Uface(i,j,k,m1_idx)   = amrex::max(rho_floor,  VB(ic,jc,kc,m1_idx));
+                Uface(i,j,k,m2_idx)   = amrex::max(p_floor,    VB(ic,jc,kc,m2_idx));
+                Uface(i,j,k,etot_idx) = amrex::max(ie_floor,   VB(ic,jc,kc,etot_idx));
+                Set::Scalar a = VB(ic,jc,kc,alpha_idx);
+                a = amrex::min(1.0 - alpha_floor, amrex::max(alpha_floor, a));
+                Uface(i,j,k,alpha_idx) = a;
+
+                // Copy velocities/transverse comps from VariableBuffer (primitive slots)
+                // This keeps architecture minimal: assume primitive buffer already stores them.
+                // If your layout is different, keep only the 4 clamps above.
+                // (No-op for other components is acceptable; the core fix is rho,p,ie,alpha.)
+            };
+
+            // --- Left face state check ---
+            {
+                Set::Scalar rho = UL(i,j,k,m1_idx);
+                Set::Scalar p   = UL(i,j,k,m2_idx);
+                Set::Scalar ie  = UL(i,j,k,etot_idx);
+                Set::Scalar a   = UL(i,j,k,alpha_idx);
+
+                // Clamp alpha always (even if otherwise valid)
+                a = amrex::min(1.0 - alpha_floor, amrex::max(alpha_floor, a));
+                UL(i,j,k,alpha_idx) = a;
+
+                const bool ok = (rho > rho_floor) && (p > p_floor) && (ie > ie_floor);
+                if (!ok) fix_state(UL, iL, jL, kL);
+            }
+
+            // --- Right face state check ---
+            {
+                Set::Scalar rho = UR(i,j,k,m1_idx);
+                Set::Scalar p   = UR(i,j,k,m2_idx);
+                Set::Scalar ie  = UR(i,j,k,etot_idx);
+                Set::Scalar a   = UR(i,j,k,alpha_idx);
+
+                a = amrex::min(1.0 - alpha_floor, amrex::max(alpha_floor, a));
+                UR(i,j,k,alpha_idx) = a;
+
+                const bool ok = (rho > rho_floor) && (p > p_floor) && (ie > ie_floor);
+                if (!ok) fix_state(UR, iR, jR, kR);
+            }
+        });
+    }
+
+    LeftStates.FillBoundary();
+    RightStates.FillBoundary();
+}
+
 // For variable-based reconstruction methods like HLLC
 template <typename IntegratorDerivedClass>
+
+
 void FluxHandler<IntegratorDerivedClass>::ProcessVariableBasedReconstruction(
+   
+
+    
     int direction, int lev, IntegratorDerivedClass* solver) const {
 
     // Validate inputs and components
@@ -248,6 +380,10 @@ void FluxHandler<IntegratorDerivedClass>::ProcessVariableBasedReconstruction(
     amrex::MultiFab SummedFlux(face_ba, solver->dmap[lev], 
                             solver->number_of_components, ghost_cells);
 
+   
+    // if (solver->fluid_mixture != nullptr) {
+    //     ApplyPositivityLimiter_DI5(direction, lev, solver, VariableBuffer, LeftStates, RightStates);
+    // }                        
     // 7. Compute fluxes from reconstructed states
     flux_method->ComputeFluxes(direction, lev, solver, 
                             LeftStates, RightStates, SummedFlux);
@@ -352,6 +488,10 @@ void FluxHandler<IntegratorDerivedClass>::ProcessFluxBasedReconstruction(
     // 11. Store fluxes in the appropriate directional flux arrays
     variable_accessor->StoreDirectionalFlux(direction, lev, solver, 
                                         SummedFlux);
+
+
+
+
 }
 
 // First-order upwind reconstruction
@@ -687,6 +827,11 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
     const Set::Scalar gamma = 1.4;  // Ratio of specific heats
     const int nghosts = solver->number_of_ghost_cells;
 
+    // --- MODIFICATION START ---
+    // Get the fluid mixture model (will be nullptr if not FiveEquationModel)
+    const auto* mixture_model = solver->fluid_mixture.get(); 
+    // --- MODIFICATION END ---
+
     // Loop through the grid
     for (amrex::MFIter mfi(SummedFlux, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
         const amrex::Box& face_bx_with_ghosts = mfi.grownnodaltilebox(direction, nghosts);
@@ -711,6 +856,34 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
 
         int num_components = solver->number_of_components;
 
+        // --- MODIFICATION START ---
+        // Get the face velocity array for storing S_star
+        amrex::Array4<Set::Scalar> face_vel_arr;
+        
+        if (mixture_model != nullptr) {
+          
+            if (direction == FluxHandler<IntegratorDerivedClass>::Directions::Xdir) {
+                face_vel_arr = solver->UFace_mf.Patch(lev, mfi);
+            
+            } else if (direction == FluxHandler<IntegratorDerivedClass>::Directions::Ydir) {
+                face_vel_arr = solver->VFace_mf.Patch(lev, mfi);
+            } else {
+#if AMREX_SPACEDIM == 3
+                face_vel_arr = solver->WFace_mf.Patch(lev, mfi);
+#endif
+            }
+        }
+
+        // Get all 7 indices for the 5-equation model
+        const int m1_idx   = solver->variableIndex.M1;
+        const int m2_idx   = solver->variableIndex.M2;
+        const int momx_idx = solver->variableIndex.MOMX;
+        const int momy_idx = solver->variableIndex.MOMY;
+        const int momz_idx = solver->variableIndex.MOMZ;
+        const int etot_idx = solver->variableIndex.ETOT;
+        const int alpha_idx= solver->variableIndex.ALPHA;
+        // --- MODIFICATION END ---
+     
         // Parallel loop over cells
         amrex::ParallelFor(face_bx_with_ghosts, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
             // Setup indices
@@ -732,210 +905,485 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
             // Clamp indices to ensure they're within bounds
             ClampIndices(index, lower_bounds, upper_bounds);
 
-            // Get LEFT conservative variables from reconstructed state
-            Set::Scalar rho_L = Left_arr(index[0], index[1], index[2], solver->variableIndex.DENS);
-            rho_L = std::max(rho_L, 1e-8);  // Avoid zero density
+            // --- MODIFICATION START ---
+            // Check solver type and branch
+            // FIXED: Check fluid_mixture pointer instead of SolverType enum
+            if (mixture_model != nullptr) {
+                
+                // --- 5-EQUATION HLLC FLUX ---
+                // This logic is translated from hllc_flux_DI5_basic
+                
+                // 1. Read Reconstructed Primitives (Left)
+                //    (from FiveEquationVariableAccessor::CopyVariables)
+                //    Indices are: [M1]=rho, [M2]=p, [MOMX]=u, [MOMY]=v, [MOMZ]=w, [ETOT]=ie_mix, [ALPHA]=alpha
+                const Set::Scalar m1_L     = Left_arr(i, j, k, m1_idx);
+                const Set::Scalar m2_L       = Left_arr(i, j, k, m2_idx);
+                const Set::Scalar u_L       = Left_arr(i, j, k, momx_idx);
+#if AMREX_SPACEDIM >= 2
+                const Set::Scalar v_L       = Left_arr(i, j, k, momy_idx);
+#else
+                const Set::Scalar v_L       = 0.0;
+#endif
+#if AMREX_SPACEDIM == 3
+                const Set::Scalar w_L       = Left_arr(i, j, k, momz_idx);
+#else
+                const Set::Scalar w_L       = 0.0;
+#endif
+                const Set::Scalar p_L  = Left_arr(i, j, k, etot_idx);
+                const Set::Scalar alpha_L   = amrex::min(amrex::max(Left_arr(i, j, k, alpha_idx), 0.0), 1.0); // Clip alpha
+                const Set::Scalar rho_L = m1_L + m2_L;
 
-            Set::Scalar mom_L_normal = Left_arr(index[0], index[1], index[2], velocity_component[normal]);
-            Set::Scalar vel_L_normal = mom_L_normal / rho_L;
+                const Set::Scalar vel_L_normal = Left_arr(i, j, k, momx_idx + normal);
+                const Set::Scalar vel_L_trans1 = (AMREX_SPACEDIM >= 2) ? Left_arr(i, j, k, momx_idx + trans1) : 0.0;
+                // FIXED: Add preprocessor guard
+#if AMREX_SPACEDIM == 3
+                const Set::Scalar vel_L_trans2 = Left_arr(i, j, k, momx_idx + trans2);
+#endif
 
-            Set::Scalar vel_L[3] = {0.0, 0.0, 0.0};
-            vel_L[normal] = vel_L_normal;
+                // 2. Read Reconstructed Primitives (Right)
+                const Set::Scalar m1_R     = Right_arr(i, j, k, m1_idx);
+                const Set::Scalar m2_R       = Right_arr(i, j, k, m2_idx);
+                const Set::Scalar u_R       = Right_arr(i, j, k, momx_idx);
+#if AMREX_SPACEDIM >= 2
+                const Set::Scalar v_R       = Right_arr(i, j, k, momy_idx);
+#else
+                const Set::Scalar v_R       = 0.0;
+#endif
+#if AMREX_SPACEDIM == 3
+                const Set::Scalar w_R       = Right_arr(i, j, k, momz_idx);
+#else
+                const Set::Scalar w_R       = 0.0;
+#endif
+                const Set::Scalar p_R  = Right_arr(i, j, k, etot_idx);
+                const Set::Scalar alpha_R   = amrex::min(amrex::max(Right_arr(i, j, k, alpha_idx), 0.0), 1.0); // Clip alpha
+                const Set::Scalar rho_R = m1_R + m2_R;
+                
+                const Set::Scalar vel_R_normal = Right_arr(i, j, k, momx_idx + normal);
+                const Set::Scalar vel_R_trans1 = (AMREX_SPACEDIM >= 2) ? Right_arr(i, j, k, momx_idx + trans1) : 0.0;
+                // FIXED: Add preprocessor guard
+#if AMREX_SPACEDIM == 3
+                const Set::Scalar vel_R_trans2 = Right_arr(i, j, k, momx_idx + trans2);
+#endif
+
+                // 3. Compute Conserved States (QL, QR)
+                std::vector<Set::Scalar> QL_cons(num_components, 0.0);
+                const Set::Scalar ke_L = 0.5 * (u_L*u_L + v_L*v_L + w_L*w_L);
+                const Set::Scalar ie_mix_L = mixture_model->mixture_internal_energy(rho_L, p_L, alpha_L);
+                QL_cons[m1_idx]   = m1_L;
+                QL_cons[m2_idx]   = m2_L;
+                QL_cons[momx_idx]  = rho_L * u_L;
+#if AMREX_SPACEDIM >= 2
+                QL_cons[momy_idx]  = rho_L * v_L;
+#endif
+#if AMREX_SPACEDIM == 3
+                QL_cons[momz_idx]  = rho_L * w_L;
+#endif
+                QL_cons[etot_idx]  = rho_L * (ie_mix_L + ke_L);
+                QL_cons[alpha_idx] = alpha_L; // advect alpha
+
+                std::vector<Set::Scalar> QR_cons(num_components, 0.0);
+                const Set::Scalar ke_R = 0.5 * (u_R*u_R + v_R*v_R + w_R*w_R);
+                const Set::Scalar ie_mix_R = mixture_model->mixture_internal_energy(rho_R, p_R, alpha_R);
+                QR_cons[m1_idx]   = m1_R;
+                QR_cons[m2_idx]   = m2_R;
+                QR_cons[momx_idx]  = rho_R * u_R;
+#if AMREX_SPACEDIM >= 2
+                QR_cons[momy_idx]  = rho_R * v_R;
+#endif
+#if AMREX_SPACEDIM == 3
+                QR_cons[momz_idx]  = rho_R * w_R;
+#endif
+                QR_cons[etot_idx]  = rho_R * (ie_mix_R + ke_R);
+                QR_cons[alpha_idx] = alpha_R; // advect alpha
+
+                // 4. Compute Physical Fluxes (FL, FR)
+                std::vector<Set::Scalar> FL(num_components, 0.0);
+                FL[m1_idx]    = QL_cons[m1_idx] * vel_L_normal;
+                FL[m2_idx]    = QL_cons[m2_idx] * vel_L_normal;
+                // FL[momx_idx]  = QL_cons[momx_idx] * vel_L_normal;
+                FL[momx_idx] = rho_L * u_L * vel_L_normal;
+#if AMREX_SPACEDIM >= 2
+                // FL[momy_idx]  = QL_cons[momy_idx] * vel_L_normal;
+                FL[momy_idx] = rho_L * v_L * vel_L_normal;
+#endif
+#if AMREX_SPACEDIM == 3
+                // FL[momz_idx]  = QL_cons[momz_idx] * vel_L_normal;
+                FL[momz_idx] = rho_L * w_L * vel_L_normal;
+#endif
+                FL[momx_idx + normal] += p_L; // Add pressure term to normal momentum flux
+                FL[etot_idx]  = (QL_cons[etot_idx] + p_L) * vel_L_normal;
+                FL[alpha_idx] = QL_cons[alpha_idx] * vel_L_normal;
+
+                std::vector<Set::Scalar> FR(num_components, 0.0);
+                FR[m1_idx]    = QR_cons[m1_idx] * vel_R_normal;
+                FR[m2_idx]    = QR_cons[m2_idx] * vel_R_normal;
+                // FR[momx_idx]  = QR_cons[momx_idx] * vel_R_normal;
+                FR[momx_idx] = rho_R * u_R * vel_R_normal;
+#if AMREX_SPACEDIM >= 2
+                // FR[momy_idx]  = QR_cons[momy_idx] * vel_R_normal;
+                FR[momy_idx] = rho_R * v_R * vel_R_normal;
+#endif
+#if AMREX_SPACEDIM == 3
+                // FR[momz_idx]  = QR_cons[momz_idx] * vel_R_normal;
+                FR[momz_idx] = rho_R * w_R * vel_R_normal;
+#endif
+                FR[momx_idx + normal] += p_R; // Add pressure term to normal momentum flux
+                FR[etot_idx]  = (QR_cons[etot_idx] + p_R) * vel_R_normal;
+                FR[alpha_idx] = QR_cons[alpha_idx] * vel_R_normal;
+
+                // 5. Compute HLLC Wave Speeds
+                const Set::Scalar c_L = mixture_model->sound_speed_mixture(rho_L, p_L, alpha_L);
+                const Set::Scalar c_R = mixture_model->sound_speed_mixture(rho_R, p_R, alpha_R);
+
+                const Set::Scalar SL = amrex::min(vel_L_normal - c_L, vel_R_normal - c_R);
+                const Set::Scalar SR = amrex::max(vel_L_normal + c_L, vel_R_normal + c_R);
+
+                const Set::Scalar denom = (rho_L * (SL - vel_L_normal) - rho_R * (SR - vel_R_normal));
+                // Get the normal component of momentum for S_star calculation
+                const Set::Scalar mom_L_normal_cons = QL_cons[momx_idx + normal];
+                const Set::Scalar mom_R_normal_cons = QR_cons[momx_idx + normal];
+                
+                const Set::Scalar S_star = (p_R - p_L + mom_L_normal_cons * (SL - vel_L_normal) - mom_R_normal_cons * (SR - vel_R_normal)) / (denom + 1e-16);
+                
+
+                // ---------- Face/interface velocity u_{i+1/2} (Eq. 35) ----------
+                const Set::Scalar S_minus = amrex::min(Set::Scalar(0.0), SL);  // S^- = min(0, S^L)
+                const Set::Scalar S_plus  = amrex::max(Set::Scalar(0.0), SR);  // S^+ = max(0, S^R)
+
+                // sgn(S*) in {-1, +1} (treat 0 as +1 to match typical ">=0" branching)
+                const Set::Scalar sgnSstar = (S_star >= 0.0) ? Set::Scalar(1.0) : Set::Scalar(-1.0);
+
+                const Set::Scalar HL = 0.5 * (1.0 + sgnSstar);  // (1 + sgn(S*))/2
+                const Set::Scalar HR = 0.5 * (1.0 - sgnSstar);  // (1 - sgn(S*))/2
+
+                // Terms inside Eq. (35)
+                const Set::Scalar ratioL = (SL - vel_L_normal) / (SL - S_star + 1e-16);
+                const Set::Scalar ratioR = (SR - vel_R_normal) / (SR - S_star + 1e-16);
+
+                // Eq. (35):
+                // u_face = HL * [ uL + S^- ( (SL-uL)/(SL-S*) - 1 ) ] + HR * [ uR + S^+ ( (SR-uR)/(SR-S*) - 1 ) ]
+                const Set::Scalar u_face =
+                    HL * (vel_L_normal + S_minus * (ratioL - 1.0)) +
+                    HR * (vel_R_normal + S_plus  * (ratioR - 1.0));
+
+                // Store for source-term discretization (alpha * div(u))
+                face_vel_arr(i, j, k, 0) = u_face;
+
+            
+                // 6. Compute Star States
+                if (SL >= 0.0) {
+                    // Flux is just FL
+                    
+                    for (int n = 0; n < num_components; ++n) {
+                        TotalFlux_arr(index[0], index[1], index[2], n) = FL[n];
+                    }
+                } else if (SR <= 0.0) {
+                    // Flux is just FR
+                    
+
+                    for (int n = 0; n < num_components; ++n) {
+                        TotalFlux_arr(index[0], index[1], index[2], n) = FR[n];
+                    }
+                } else {
+                    // In Star Region (paper form: build U*_L and U*_R directly using P_L / P_R, no p_star)
+                
+                    std::vector<Set::Scalar> UstarL(num_components, 0.0);
+                    std::vector<Set::Scalar> UstarR(num_components, 0.0);
+                
+                    // Common denominators
+                    const Set::Scalar inv_SL_Sstar = 1.0 / (SL - S_star + 1e-16);
+                    const Set::Scalar inv_SR_Sstar = 1.0 / (SR - S_star + 1e-16);
+                
+                    // -------------------------
+                    // Left star state U*_L
+                    // factorL = (S_L - u_L) / (S_L - S*)
+                    // -------------------------
+                    const Set::Scalar factorL = (SL - vel_L_normal) * inv_SL_Sstar;
+                
+                    // m1*, m2*
+                    UstarL[m1_idx] = QL_cons[m1_idx] * factorL;
+                    UstarL[m2_idx] = QL_cons[m2_idx] * factorL;
+                
+                    // momentum: normal = rho* S*, transverse unchanged (carried) times factor
+                    const Set::Scalar rho_L_tot = rho_L; // total mixture density already
+                    UstarL[momx_idx + normal] = (rho_L_tot * factorL) * S_star;
+                
+                #if AMREX_SPACEDIM >= 2
+                    UstarL[momx_idx + trans1] = QL_cons[momx_idx + trans1] * factorL;
+                #endif
+                #if AMREX_SPACEDIM == 3
+                    UstarL[momx_idx + trans2] = QL_cons[momx_idx + trans2] * factorL;
+                #endif
+                
+                    // energy (paper Eq. (32) form):
+                    // E*_L = factorL * [ E_L + (S* - u_L) * ( rho_L * S* + P_L/(S_L - u_L) ) ]
+                    const Set::Scalar inv_SL_minus_uL = 1.0 / (SL - vel_L_normal + 1e-16);
+                    UstarL[etot_idx] =
+                        factorL * ( QL_cons[etot_idx]
+                                  + (S_star - vel_L_normal) * (rho_L_tot * S_star + p_L * inv_SL_minus_uL) );
+                
+                    // alpha* (per your python logic: do NOT scale; advect alpha itself)
+                    UstarL[alpha_idx] = alpha_L * factorL;
+                
+                    // -------------------------
+                    // Right star state U*_R
+                    // factorR = (S_R - u_R) / (S_R - S*)
+                    // -------------------------
+                    const Set::Scalar factorR = (SR - vel_R_normal) * inv_SR_Sstar;
+                
+                    // m1*, m2*
+                    UstarR[m1_idx] = QR_cons[m1_idx] * factorR;
+                    UstarR[m2_idx] = QR_cons[m2_idx] * factorR;
+                
+                    // momentum
+                    const Set::Scalar rho_R_tot = rho_R;
+                    UstarR[momx_idx + normal] = (rho_R_tot * factorR) * S_star;
+                
+                #if AMREX_SPACEDIM >= 2
+                    UstarR[momx_idx + trans1] = QR_cons[momx_idx + trans1] * factorR;
+                #endif
+                #if AMREX_SPACEDIM == 3
+                    UstarR[momx_idx + trans2] = QR_cons[momx_idx + trans2] * factorR;
+                #endif
+                
+                    // energy (paper Eq. (32) form):
+                    // E*_R = factorR * [ E_R + (S* - u_R) * ( rho_R * S* + P_R/(S_R - u_R) ) ]
+                    const Set::Scalar inv_SR_minus_uR = 1.0 / (SR - vel_R_normal + 1e-16);
+                    UstarR[etot_idx] =
+                        factorR * ( QR_cons[etot_idx]
+                                  + (S_star - vel_R_normal) * (rho_R_tot * S_star + p_R * inv_SR_minus_uR) );
+                
+                    // alpha*
+                    UstarR[alpha_idx] = alpha_R*factorR;
+                
+                    // 7. Choose Final HLLC Flux (unchanged)
+                    if (S_star >= 0.0) {
+                        // F = F_L + S_L * (Ustar_L - U_L)
+                        for (int n = 0; n < num_components; ++n) {
+                            TotalFlux_arr(index[0], index[1], index[2], n) = FL[n] + SL * (UstarL[n] - QL_cons[n]);
+                        }
+                    } else {
+                        // F = F_R + S_R * (Ustar_R - U_R)
+                        for (int n = 0; n < num_components; ++n) {
+                            TotalFlux_arr(index[0], index[1], index[2], n) = FR[n] + SR * (UstarR[n] - QR_cons[n]);
+                        }
+                    }
+                }
+
+
+            } else {
+            // --- MODIFICATION END ---
+            
+                // --- ORIGINAL EULER HLLC FLUX ---
+                
+
+                // Get LEFT conservative variables from reconstructed state
+                Set::Scalar rho_L = Left_arr(index[0], index[1], index[2], solver->variableIndex.DENS);
+                rho_L = std::max(rho_L, 1e-8);  // Avoid zero density
+
+                Set::Scalar mom_L_normal = Left_arr(index[0], index[1], index[2], velocity_component[normal]);
+                Set::Scalar vel_L_normal = mom_L_normal / rho_L;
+
+                Set::Scalar vel_L[3] = {0.0, 0.0, 0.0};
+                vel_L[normal] = vel_L_normal;
 
 #if AMREX_SPACEDIM >= 2    
-            Set::Scalar mom_L_trans1 = Left_arr(index[0], index[1], index[2], velocity_component[trans1]);
-            vel_L[trans1] = mom_L_trans1 / rho_L;
+                Set::Scalar mom_L_trans1 = Left_arr(index[0], index[1], index[2], velocity_component[trans1]);
+                vel_L[trans1] = mom_L_trans1 / rho_L;
 #endif
 #if AMREX_SPACEDIM == 3    
-            Set::Scalar mom_L_trans2 = Left_arr(index[0], index[1], index[2], velocity_component[trans2]);
-            vel_L[trans2] = mom_L_trans2 / rho_L;
+                Set::Scalar mom_L_trans2 = Left_arr(index[0], index[1], index[2], velocity_component[trans2]);
+                vel_L[trans2] = mom_L_trans2 / rho_L;
 #endif
 
-            Set::Scalar rhoE_L = Left_arr(index[0], index[1], index[2], solver->variableIndex.IE);
-            Set::Scalar E_L = rhoE_L / rho_L;
+                Set::Scalar rhoE_L = Left_arr(index[0], index[1], index[2], solver->variableIndex.IE);
+                Set::Scalar E_L = rhoE_L / rho_L;
 
-            // Calculate kinetic energy for left state using symmetry-preserving operation
-            Set::Scalar KE_L = Numeric::SymmetryPreserving::ConsistentKineticEnergy(
-                rho_L, vel_L[0], vel_L[1], vel_L[2]);
+                // Calculate kinetic energy for left state using symmetry-preserving operation
+                Set::Scalar KE_L = Numeric::SymmetryPreserving::ConsistentKineticEnergy(
+                    rho_L, vel_L[0], vel_L[1], vel_L[2]);
 
-            // Calculate internal energy and pressure for left state
-            Set::Scalar e_L = E_L - KE_L / rho_L;
-            Set::Scalar pressure_L = (gamma - 1.0) * rho_L * e_L;
-            pressure_L = std::max(pressure_L, 1e-8);  // Ensure positive pressure
+                // Calculate internal energy and pressure for left state
+                Set::Scalar e_L = E_L - KE_L / rho_L;
+                Set::Scalar pressure_L = (gamma - 1.0) * rho_L * e_L;
+                pressure_L = std::max(pressure_L, 1e-8);  // Ensure positive pressure
 
-            // Get RIGHT conservative variables from reconstructed state
-            Set::Scalar rho_R = Right_arr(index[0], index[1], index[2], solver->variableIndex.DENS);
-            rho_R = std::max(rho_R, 1e-8);  // Avoid zero density
+                // Get RIGHT conservative variables from reconstructed state
+                Set::Scalar rho_R = Right_arr(index[0], index[1], index[2], solver->variableIndex.DENS);
+                rho_R = std::max(rho_R, 1e-8);  // Avoid zero density
 
-            Set::Scalar mom_R_normal = Right_arr(index[0], index[1], index[2], velocity_component[normal]);
-            Set::Scalar vel_R_normal = mom_R_normal / rho_R;
+                Set::Scalar mom_R_normal = Right_arr(index[0], index[1], index[2], velocity_component[normal]);
+                Set::Scalar vel_R_normal = mom_R_normal / rho_R;
 
-            Set::Scalar vel_R[3] = {0.0, 0.0, 0.0};
-            vel_R[normal] = vel_R_normal;
+                Set::Scalar vel_R[3] = {0.0, 0.0, 0.0};
+                vel_R[normal] = vel_R_normal;
 
 #if AMREX_SPACEDIM >= 2    
-            Set::Scalar mom_R_trans1 = Right_arr(index[0], index[1], index[2], velocity_component[trans1]);
-            vel_R[trans1] = mom_R_trans1 / rho_R;
+                Set::Scalar mom_R_trans1 = Right_arr(index[0], index[1], index[2], velocity_component[trans1]);
+                vel_R[trans1] = mom_R_trans1 / rho_R;
 #endif
 #if AMREX_SPACEDIM == 3    
-            Set::Scalar mom_R_trans2 = Right_arr(index[0], index[1], index[2], velocity_component[trans2]);
-            vel_R[trans2] = mom_R_trans2 / rho_R;
+                Set::Scalar mom_R_trans2 = Right_arr(index[0], index[1], index[2], velocity_component[trans2]);
+                vel_R[trans2] = mom_R_trans2 / rho_R;
 #endif
 
-            Set::Scalar rhoE_R = Right_arr(index[0], index[1], index[2], solver->variableIndex.IE);
-            Set::Scalar E_R = rhoE_R / rho_R;
+                Set::Scalar rhoE_R = Right_arr(index[0], index[1], index[2], solver->variableIndex.IE);
+                Set::Scalar E_R = rhoE_R / rho_R;
 
-            // Calculate kinetic energy for right state using symmetry-preserving operation
-            Set::Scalar KE_R = Numeric::SymmetryPreserving::ConsistentKineticEnergy(
-                rho_R, vel_R[0], vel_R[1], vel_R[2]);
+                // Calculate kinetic energy for right state using symmetry-preserving operation
+                Set::Scalar KE_R = Numeric::SymmetryPreserving::ConsistentKineticEnergy(
+                    rho_R, vel_R[0], vel_R[1], vel_R[2]);
 
-            // Calculate internal energy and pressure for right state
-            Set::Scalar e_R = E_R - KE_R / rho_R;
-            Set::Scalar pressure_R = (gamma - 1.0) * rho_R * e_R;
-            pressure_R = std::max(pressure_R, 1e-8);  // Ensure positive pressure
+                // Calculate internal energy and pressure for right state
+                Set::Scalar e_R = E_R - KE_R / rho_R;
+                Set::Scalar pressure_R = (gamma - 1.0) * rho_R * e_R;
+                pressure_R = std::max(pressure_R, 1e-8);  // Ensure positive pressure
 
-            // Sound speeds
-            Set::Scalar c_L = std::sqrt(gamma * pressure_L / rho_L);
-            Set::Scalar c_R = std::sqrt(gamma * pressure_R / rho_R);
+                // Sound speeds
+                Set::Scalar c_L = std::sqrt(gamma * pressure_L / rho_L);
+                Set::Scalar c_R = std::sqrt(gamma * pressure_R / rho_R);
 
-            // Store conservative variables for reconstructed left and right states
-            std::vector<Set::Scalar> QL_cons(num_components, 0.0);
-            std::vector<Set::Scalar> QR_cons(num_components, 0.0);
+                // Store conservative variables for reconstructed left and right states
+                std::vector<Set::Scalar> QL_cons(num_components, 0.0);
+                std::vector<Set::Scalar> QR_cons(num_components, 0.0);
 
-            // These are already in conservative form from the reconstruction
-            QL_cons[solver->variableIndex.DENS] = rho_L;
-            QL_cons[solver->variableIndex.UVEL + normal] = rho_L * vel_L[normal];
+                // These are already in conservative form from the reconstruction
+                QL_cons[solver->variableIndex.DENS] = rho_L;
+                QL_cons[solver->variableIndex.UVEL + normal] = rho_L * vel_L[normal];
 #if AMREX_SPACEDIM >= 2
-            QL_cons[solver->variableIndex.UVEL + trans1] = rho_L * vel_L[trans1];
+                QL_cons[solver->variableIndex.UVEL + trans1] = rho_L * vel_L[trans1];
 #endif
 #if AMREX_SPACEDIM == 3
-            QL_cons[solver->variableIndex.UVEL + trans2] = rho_L * vel_L[trans2];
+                QL_cons[solver->variableIndex.UVEL + trans2] = rho_L * vel_L[trans2];
 #endif
-            QL_cons[solver->variableIndex.IE] = rho_L * E_L;
+                QL_cons[solver->variableIndex.IE] = rho_L * E_L;
 
-            QR_cons[solver->variableIndex.DENS] = rho_R;
-            QR_cons[solver->variableIndex.UVEL + normal] = rho_R * vel_R[normal];
+                QR_cons[solver->variableIndex.DENS] = rho_R;
+                QR_cons[solver->variableIndex.UVEL + normal] = rho_R * vel_R[normal];
 #if AMREX_SPACEDIM >= 2
-            QR_cons[solver->variableIndex.UVEL + trans1] = rho_R * vel_R[trans1];
+                QR_cons[solver->variableIndex.UVEL + trans1] = rho_R * vel_R[trans1];
 #endif
 #if AMREX_SPACEDIM == 3
-            QR_cons[solver->variableIndex.UVEL + trans2] = rho_R * vel_R[trans2];
+                QR_cons[solver->variableIndex.UVEL + trans2] = rho_R * vel_R[trans2];
 #endif
-            QR_cons[solver->variableIndex.IE] = rho_R * E_R;
+                QR_cons[solver->variableIndex.IE] = rho_R * E_R;
 
-            // Compute physical fluxes for left and right states
-            std::vector<Set::Scalar> FL(num_components, 0.0);
-            std::vector<Set::Scalar> FR(num_components, 0.0);
+                // Compute physical fluxes for left and right states
+                std::vector<Set::Scalar> FL(num_components, 0.0);
+                std::vector<Set::Scalar> FR(num_components, 0.0);
 
-            // Mass flux
-            FL[solver->variableIndex.DENS] = rho_L * vel_L[normal];
-            FR[solver->variableIndex.DENS] = rho_R * vel_R[normal];
+                // Mass flux
+                FL[solver->variableIndex.DENS] = rho_L * vel_L[normal];
+                FR[solver->variableIndex.DENS] = rho_R * vel_R[normal];
 
-            // Momentum fluxes - use consistent operations
-            FL[solver->variableIndex.UVEL + normal] = rho_L * vel_L[normal] * vel_L[normal] + pressure_L;
-            FR[solver->variableIndex.UVEL + normal] = rho_R * vel_R[normal] * vel_R[normal] + pressure_R;
+                // Momentum fluxes - use consistent operations
+                FL[solver->variableIndex.UVEL + normal] = rho_L * vel_L[normal] * vel_L[normal] + pressure_L;
+                FR[solver->variableIndex.UVEL + normal] = rho_R * vel_R[normal] * vel_R[normal] + pressure_R;
 
 #if AMREX_SPACEDIM >= 2
-            FL[solver->variableIndex.UVEL + trans1] = rho_L * vel_L[normal] * vel_L[trans1];
-            FR[solver->variableIndex.UVEL + trans1] = rho_R * vel_R[normal] * vel_R[trans1];
+                FL[solver->variableIndex.UVEL + trans1] = rho_L * vel_L[normal] * vel_L[trans1];
+                FR[solver->variableIndex.UVEL + trans1] = rho_R * vel_R[normal] * vel_R[trans1];
 #endif
 #if AMREX_SPACEDIM == 3
-            FL[solver->variableIndex.UVEL + trans2] = rho_L * vel_L[normal] * vel_L[trans2];
-            FR[solver->variableIndex.UVEL + trans2] = rho_R * vel_R[normal] * vel_R[trans2];
+                FL[solver->variableIndex.UVEL + trans2] = rho_L * vel_L[normal] * vel_L[trans2];
+                FR[solver->variableIndex.UVEL + trans2] = rho_R * vel_R[normal] * vel_R[trans2];
 #endif
 
-            // Energy flux - use consistent operations
-            FL[solver->variableIndex.IE] = (rho_L * E_L + pressure_L) * vel_L[normal];
-            FR[solver->variableIndex.IE] = (rho_R * E_R + pressure_R) * vel_R[normal];
+                // Energy flux - use consistent operations
+                FL[solver->variableIndex.IE] = (rho_L * E_L + pressure_L) * vel_L[normal];
+                FR[solver->variableIndex.IE] = (rho_R * E_R + pressure_R) * vel_R[normal];
 
-            // Wave speeds using Davis estimates (more robust than Roe averages)
-            Set::Scalar SL = std::min(vel_L[normal] - c_L, vel_R[normal] - c_R);
-            Set::Scalar SR = std::max(vel_L[normal] + c_L, vel_R[normal] + c_R);
+                // Wave speeds using Davis estimates (more robust than Roe averages)
+                Set::Scalar SL = std::min(vel_L[normal] - c_L, vel_R[normal] - c_R);
+                Set::Scalar SR = std::max(vel_L[normal] + c_L, vel_R[normal] + c_R);
 
-            // Apply entropy fix for transonic rarefactions
-            Set::Scalar epsilon = 0.1 * std::min(c_L, c_R); 
-            if (std::abs(SR - SL) < epsilon) {
-                SR += epsilon;
-                SL -= epsilon;    
-            }   
+                // Apply entropy fix for transonic rarefactions
+                Set::Scalar epsilon = 0.1 * std::min(c_L, c_R); 
+                if (std::abs(SR - SL) < epsilon) {
+                    SR += epsilon;
+                    SL -= epsilon;    
+                }   
 
-            // Calculate the middle wave speed (S*) using the symmetry-preserving operation
-            Set::Scalar S_star = Numeric::SymmetryPreserving::ConsistentContactWaveSpeed(
-                pressure_R, pressure_L, 
-                rho_L, vel_L[normal], SL, 
-                rho_R, vel_R[normal], SR);
+                // Calculate the middle wave speed (S*) using the symmetry-preserving operation
+                Set::Scalar S_star = Numeric::SymmetryPreserving::ConsistentContactWaveSpeed(
+                    pressure_R, pressure_L, 
+                    rho_L, vel_L[normal], SL, 
+                    rho_R, vel_R[normal], SR);
 
-            // Compute star state variables
-            std::vector<Set::Scalar> QL_star(num_components, 0.0);
-            std::vector<Set::Scalar> QR_star(num_components, 0.0);
+                // Compute star state variables
+                std::vector<Set::Scalar> QL_star(num_components, 0.0);
+                std::vector<Set::Scalar> QR_star(num_components, 0.0);
 
-            // Density factors for star regions
-            Set::Scalar rho_L_star = rho_L * (SL - vel_L[normal]) / (SL - S_star);
-            Set::Scalar rho_R_star = rho_R * (SR - vel_R[normal]) / (SR - S_star);
+                // Density factors for star regions
+                Set::Scalar rho_L_star = rho_L * (SL - vel_L[normal]) / (SL - S_star);
+                Set::Scalar rho_R_star = rho_R * (SR - vel_R[normal]) / (SR - S_star);
 
-            // Left star state
-            QL_star[solver->variableIndex.DENS] = rho_L_star;
-            QL_star[solver->variableIndex.UVEL + normal] = rho_L_star * S_star;
+                // Left star state
+                QL_star[solver->variableIndex.DENS] = rho_L_star;
+                QL_star[solver->variableIndex.UVEL + normal] = rho_L_star * S_star;
 #if AMREX_SPACEDIM >= 2
-            QL_star[solver->variableIndex.UVEL + trans1] = rho_L_star * vel_L[trans1];
+                QL_star[solver->variableIndex.UVEL + trans1] = rho_L_star * vel_L[trans1];
 #endif
 #if AMREX_SPACEDIM == 3
-            QL_star[solver->variableIndex.UVEL + trans2] = rho_L_star * vel_L[trans2];
+                QL_star[solver->variableIndex.UVEL + trans2] = rho_L_star * vel_L[trans2];
 #endif
-            // Use consistent operations for the star state energy
-            Set::Scalar pressureTerm_L = pressure_L / (rho_L * (SL - vel_L[normal]));
-            Set::Scalar velocityDiff_L = S_star - vel_L[normal];
+                // Use consistent operations for the star state energy
+                Set::Scalar pressureTerm_L = pressure_L / (rho_L * (SL - vel_L[normal]));
+                Set::Scalar velocityDiff_L = S_star - vel_L[normal];
 
-            QL_star[solver->variableIndex.IE] = rho_L_star * (E_L + velocityDiff_L * (S_star + pressureTerm_L));
+                QL_star[solver->variableIndex.IE] = rho_L_star * (E_L + velocityDiff_L * (S_star + pressureTerm_L));
 
-            // Right star state
-            QR_star[solver->variableIndex.DENS] = rho_R_star;
-            QR_star[solver->variableIndex.UVEL + normal] = rho_R_star * S_star;
+                // Right star state
+                QR_star[solver->variableIndex.DENS] = rho_R_star;
+                QR_star[solver->variableIndex.UVEL + normal] = rho_R_star * S_star;
 #if AMREX_SPACEDIM >= 2
-            QR_star[solver->variableIndex.UVEL + trans1] = rho_R_star * vel_R[trans1];
+                QR_star[solver->variableIndex.UVEL + trans1] = rho_R_star * vel_R[trans1];
 #endif
 #if AMREX_SPACEDIM == 3
-            QR_star[solver->variableIndex.UVEL + trans2] = rho_R_star * vel_R[trans2];
+                QR_star[solver->variableIndex.UVEL + trans2] = rho_R_star * vel_R[trans2];
 #endif
-            // Use consistent operations for the star state energy
-            Set::Scalar pressureTerm_R = pressure_R / (rho_R * (SR - vel_R[normal]));
-            Set::Scalar velocityDiff_R = S_star - vel_R[normal];
+                // Use consistent operations for the star state energy
+                Set::Scalar pressureTerm_R = pressure_R / (rho_R * (SR - vel_R[normal]));
+                Set::Scalar velocityDiff_R = S_star - vel_R[normal];
 
-            QR_star[solver->variableIndex.IE] = rho_R_star * (E_R + velocityDiff_R * (S_star + pressureTerm_R));
+                QR_star[solver->variableIndex.IE] = rho_R_star * (E_R + velocityDiff_R * (S_star + pressureTerm_R));
 
-            // Use a centralized formulation for computing consistent fluxes
-            // Precompute star region fluxes
-            std::vector<Set::Scalar> FL_star(num_components, 0.0);
-            std::vector<Set::Scalar> FR_star(num_components, 0.0);
+                // Use a centralized formulation for computing consistent fluxes
+                // Precompute star region fluxes
+                std::vector<Set::Scalar> FL_star(num_components, 0.0);
+                std::vector<Set::Scalar> FR_star(num_components, 0.0);
 
-            for (int n = 0; n < num_components; ++n) {
-                FL_star[n] = FL[n] + SL * (QL_star[n] - QL_cons[n]);
-                FR_star[n] = FR[n] + SR * (QR_star[n] - QR_cons[n]);
-            }
+                for (int n = 0; n < num_components; ++n) {
+                    FL_star[n] = FL[n] + SL * (QL_star[n] - QL_cons[n]);
+                    FR_star[n] = FR[n] + SR * (QR_star[n] - QR_cons[n]);
+                }
 
-            // Define Heaviside-like functions for the wave speeds - outside the loop since they're the same for all components
-            Set::Scalar HL = 0.5 * (1.0 + std::copysign(1.0, SL));     // H(SL): 1 if SL >= 0, 0 if SL < 0
-            Set::Scalar HStar = 0.5 * (1.0 + std::copysign(1.0, S_star)); // H(S*): 1 if S* >= 0, 0 if S* < 0
-            Set::Scalar HR = 0.5 * (1.0 + std::copysign(1.0, SR));     // H(SR): 1 if SR >= 0, 0 if SR < 0
+                // Define Heaviside-like functions for the wave speeds - outside the loop since they're the same for all components
+                Set::Scalar HL = 0.5 * (1.0 + std::copysign(1.0, SL));     // H(SL): 1 if SL >= 0, 0 if SL < 0
+                Set::Scalar HStar = 0.5 * (1.0 + std::copysign(1.0, S_star)); // H(S*): 1 if S* >= 0, 0 if S* < 0
+                Set::Scalar HR = 0.5 * (1.0 + std::copysign(1.0, SR));     // H(SR): 1 if SR >= 0, 0 if SR < 0
 
-            // Branch-free HLLC flux calculation
-            for (int n = 0; n < num_components; ++n) {
-                // Compute full HLLC flux using branch-free formulation
-                Set::Scalar HLLC_flux = 
-                    HL * FL[n] +                                  // Case: SL >= 0
-                    (1.0 - HL) * HStar * FL_star[n] +            // Case: SL < 0, S* >= 0
-                    (1.0 - HStar) * HR * FR_star[n] +            // Case: S* < 0, SR >= 0
-                    (1.0 - HR) * FR[n];                          // Case: SR < 0
+                // Branch-free HLLC flux calculation
+                for (int n = 0; n < num_components; ++n) {
+                    // Compute full HLLC flux using branch-free formulation
+                    Set::Scalar HLLC_flux = 
+                        HL * FL[n] +                                  // Case: SL >= 0
+                        (1.0 - HL) * HStar * FL_star[n] +            // Case: SL < 0, S* >= 0
+                        (1.0 - HStar) * HR * FR_star[n] +            // Case: S* < 0, SR >= 0
+                        (1.0 - HR) * FR[n];                          // Case: SR < 0
 
-                // Store the computed flux
-                TotalFlux_arr(index[0], index[1], index[2], n) = HLLC_flux;
-            }
+                    // Store the computed flux
+                    TotalFlux_arr(index[0], index[1], index[2], n) = HLLC_flux;
+                }
+
+            } // --- MODIFICATION END (end of if/else) ---
 
         });
     }
 }
 
 };
+
 
 
 /**
@@ -1239,7 +1687,6 @@ public:
 };*/
 
 // AUSM+up flux method with symmetry-preserving operations
-
 template <typename IntegratorDerivedClass>
 class AUSMupMethod : public FluxMethod<IntegratorDerivedClass> {
 public:
@@ -1256,23 +1703,7 @@ public:
         // Not the primary pathway for AUSM+up
         Util::Warning(INFO, "AUSM+up SplitFluxes called - not optimal path");
     }
-
-Set::Scalar M_infinity;
-Set::Scalar Mp_cut;
-Set::Scalar Kp;
-Set::Scalar Ku;
-Set::Scalar sigma;
- 
-static void Parse(AUSMupMethod& value, IO::ParmParse& pp)
-{
-pp.query_default("freeStreamMachNumber", value.M_infinity, 1.0);
-pp.query_default("Mp_cut", value.Mp_cut, 0.1);
-pp.query_default("Kp", value.Kp, 0.25);
-pp.query_default("Ku", value.Ku, 0.75);
-pp.query_default("sigma", value.sigma, 1.0);
-}
-  
- 
+   
 void ComputeFluxes(int direction, int /*lev*/, IntegratorDerivedClass* solver,
             const amrex::MultiFab& LeftStates, const amrex::MultiFab& RightStates,
             amrex::MultiFab& SummedFlux) const override {
@@ -1280,11 +1711,7 @@ void ComputeFluxes(int direction, int /*lev*/, IntegratorDerivedClass* solver,
     const Set::Scalar gamma = 1.4;  // Ratio of specific heats
     const int nghosts = solver->number_of_ghost_cells;
 
-    IO::ParmParse pp;  
-    AUSMupMethod::Parse(*const_cast<AUSMupMethod*>(this), pp);
-    const Set::Scalar M_inf = this->M_infinity; //SHOULD NOT BE ZERO
-
-//    Util::ScimitarX_Util::Debug::SetTargetDebugLocationIndices(50, 10, 0, "true");
+    //Util::ScimitarX_Util::Debug::SetTargetDebugLocationIndices(100, 25, 1, "true");
 
     // Loop through the grid
     for (amrex::MFIter mfi(SummedFlux, false); mfi.isValid(); ++mfi) {
@@ -1334,7 +1761,7 @@ void ComputeFluxes(int direction, int /*lev*/, IntegratorDerivedClass* solver,
 
             // Get LEFT conservative variables from reconstructed state
             Set::Scalar rho_L = Left_arr(index[0], index[1], index[2], solver->variableIndex.DENS);
-            rho_L = std::max(rho_L, 1.0e-8);  // Avoid zero density
+            rho_L = std::max(rho_L, 1e-8);  // Avoid zero density
             
             Set::Scalar mom_L_normal = Left_arr(index[0], index[1], index[2], velocity_component[normal]);
             Set::Scalar vel_L_normal = mom_L_normal / rho_L;
@@ -1352,20 +1779,20 @@ void ComputeFluxes(int direction, int /*lev*/, IntegratorDerivedClass* solver,
 #endif
             
             Set::Scalar rhoE_L = Left_arr(index[0], index[1], index[2], solver->variableIndex.IE);
-            Set::Scalar E_L = std::max(rhoE_L / rho_L, 1.0e-8);
+            Set::Scalar E_L = rhoE_L / rho_L;
             
             // Calculate kinetic energy for left state using symmetry-preserving operation
             Set::Scalar KE_L = Numeric::SymmetryPreserving::ConsistentKineticEnergy(
                 rho_L, vel_L[0], vel_L[1], vel_L[2]);
             
             // Calculate internal energy and pressure for left state
-            Set::Scalar e_L = std::max(E_L - KE_L / rho_L, 1.0e-8);
+            Set::Scalar e_L = E_L - KE_L / rho_L;
             Set::Scalar pressure_L = (gamma - 1.0) * rho_L * e_L;
-            pressure_L = std::max(pressure_L, 1.0e-8);  // Ensure positive pressure
+            pressure_L = std::max(pressure_L, 1e-8);  // Ensure positive pressure
             
             // Get RIGHT conservative variables from reconstructed state
             Set::Scalar rho_R = Right_arr(index[0], index[1], index[2], solver->variableIndex.DENS);
-            rho_R = std::max(rho_R, 1.0e-8);  // Avoid zero density
+            rho_R = std::max(rho_R, 1e-8);  // Avoid zero density
             
             Set::Scalar mom_R_normal = Right_arr(index[0], index[1], index[2], velocity_component[normal]);
             Set::Scalar vel_R_normal = mom_R_normal / rho_R;
@@ -1383,25 +1810,25 @@ void ComputeFluxes(int direction, int /*lev*/, IntegratorDerivedClass* solver,
 #endif
             
             Set::Scalar rhoE_R = Right_arr(index[0], index[1], index[2], solver->variableIndex.IE);
-            Set::Scalar E_R = std::max(rhoE_R / rho_R, 1.0e-8);
+            Set::Scalar E_R = rhoE_R / rho_R;
             
             // Calculate kinetic energy for right state using symmetry-preserving operation
             Set::Scalar KE_R = Numeric::SymmetryPreserving::ConsistentKineticEnergy(
                 rho_R, vel_R[0], vel_R[1], vel_R[2]);
             
             // Calculate internal energy and pressure for right state
-            Set::Scalar e_R = std::max(E_R - KE_R / rho_R, 1.0e-8);
+            Set::Scalar e_R = E_R - KE_R / rho_R;
             Set::Scalar pressure_R = (gamma - 1.0) * rho_R * e_R;
-            pressure_R = std::max(pressure_R, 1.0e-8);  // Ensure positive pressure
+            pressure_R = std::max(pressure_R, 1e-8);  // Ensure positive pressure
             
             // Sound speeds
-            Set::Scalar c_L = std::sqrt(std::max(1.0e-8, gamma * pressure_L / rho_L));
-            Set::Scalar c_R = std::sqrt(std::max(1.0e-8, gamma * pressure_R / rho_R));
+            //Set::Scalar c_L = std::sqrt(gamma * pressure_L / rho_L);
+            //Set::Scalar c_R = std::sqrt(gamma * pressure_R / rho_R);
 
         // ######################################
             // Define specific total Enthalpy H_total 
-        Set::Scalar H_total_L = std::max(1.0e-08,E_L + pressure_L/rho_L);  // = Cv.T + (Vel^2)/2 + P/rho = specific Total Enthalpy
-        Set::Scalar H_total_R = std::max(1.0e-08, E_R + pressure_R/rho_R);
+        Set::Scalar H_total_L = E_L + pressure_L/rho_L;  // = Cv.T + (Vel^2)/2 + P/rho = specific Total Enthalpy
+        Set::Scalar H_total_R = E_R + pressure_R/rho_R;
 
         // Define critical speed of sound c_star
         Set::Scalar c_star_L = std::sqrt(2*(gamma-1)*H_total_L/(gamma+1));
@@ -1412,106 +1839,64 @@ void ComputeFluxes(int direction, int /*lev*/, IntegratorDerivedClass* solver,
         Set::Scalar c_R_hat = std::pow(c_star_R,2)/nonZeroValue(std::max(c_star_R,std::abs(vel_R[normal])));
 
         // Define interface acoustic speed c_interface
-        Set::Scalar c_interface = std::min((0.5*(c_L + c_R)), std::min(c_L_hat,c_R_hat)); 
-        // using total enthalpy and critical acoustic speed and simple mean
+        //Set::Scalar c_interface = std::sqrt(c_L*c_R); //simple geometric mean
+        Set::Scalar c_interface = std::min(c_L_hat,c_R_hat); // using total enthalpy and critical acoustic speed
 
         // Define M_L and M_R
         Set::Scalar M_L = vel_L[normal]/nonZeroValue(c_interface);
         Set::Scalar M_R = vel_R[normal]/nonZeroValue(c_interface);
 
-        // Define M_localMean and M0
+        // Define M_localMean, M_inf  and M0
         Set::Scalar M_localMean = std::sqrt(0.5*(M_L*M_L + M_R*M_R));
+        Set::Scalar M_inf = 1.0; //*** has to be user input and SHOULD NOT BE ZERO
         Set::Scalar M0 = std::sqrt(std::min(1.0,std::max(M_localMean*M_localMean, M_inf*M_inf)));
-        Set::Scalar M0_p = std::min(1.0,std::max(M_localMean, Mp_cut));
 
         // Define scaling function fa, interface density rho_interface, sigma and Kp constant terms
-        //Set::Scalar fa = std::sqrt(std::pow((1.0-M0*M0)*M_localMean , 2) + 4*M0*M0)/(1+M0*M0);
-        Set::Scalar fa = M0*(2.0-M0); // scaling factor for velocity diffusion term in pressure flux
-        Set::Scalar fa_p = M0_p*(2.0-M0_p); // scaling factor for pressure diffusion term in interface Mach number
+        Set::Scalar fa = std::sqrt(std::pow((1.0-M0*M0)*M_localMean , 2) + 4*M0*M0)/(1+M0*M0);
+        Set::Scalar rho_interface = 0.5*(rho_L + rho_R);
+        const Set::Scalar sigma = 1.0;
+        const Set::Scalar Kp = 0.25; // constant for pressure difference (diffusion) term
 
-        Set::Scalar rho_interface = 0.5*(rho_L + rho_R);                
-
-        Set::Scalar alpha = 3.0/16.0*(-4.0+5.0*fa*fa);
-        Set::Scalar beta = 1.0/8.0;
-
-        Set::Scalar M1plus_L = 0.5*(M_L + std::abs(M_L));
-        Set::Scalar M1minus_R = 0.5*(M_R - std::abs(M_R));
-
-        Set::Scalar M2plus_L = 0.25*(M_L + 1)*(M_L + 1);
-        Set::Scalar M2minus_L = -0.25*(M_L - 1)*(M_L - 1);
-        Set::Scalar M2plus_R = 0.25*(M_R + 1)*(M_R + 1);
-        Set::Scalar M2minus_R = -0.25*(M_R - 1)*(M_R - 1);
-
-        Set::Scalar A_M_L = 0.5*(1.0 + std::copysign(1.0, std::abs(M_L)-1.0));
-        Set::Scalar B_M_L = std::abs(1.0 - A_M_L);
-        Set::Scalar A_M_R = 0.5*(1.0 + std::copysign(1.0, std::abs(M_R)-1.0));
-        Set::Scalar B_M_R = std::abs(1.0 - A_M_R);
-
-        Set::Scalar M4plus_L = A_M_L*(M1plus_L) + B_M_L*(M2plus_L*(1.0 - 16.0*beta*M2minus_L));
-        Set::Scalar M4minus_R = A_M_R*(M1minus_R) + B_M_R*(M2minus_R*(1.0 + 16.0*beta*M2plus_R));
-
-        Set::Scalar P5plus_L = A_M_L*M1plus_L/(M_L + 1.0e-10) + B_M_L*M2plus_L*(2.0 - M_L - 16.0*alpha*M_L*M2minus_L);
-        Set::Scalar P5minus_R = A_M_R*M1minus_R/(M_R + 1.0e-10) + B_M_R*M2minus_R*(-2.0 - M_R + 16.0*alpha*M_R*M2plus_R);
-        
         // Calculate interface Mach number, M_interface
-        Set::Scalar M_pressureDiffusion = (-Kp/(fa_p + 1.0e-10))*std::max((1.0-sigma*M_localMean*M_localMean),0.0)*
-                                          (pressure_R-pressure_L)/(rho_interface*c_interface*c_interface + 1.0e-10);
+        Set::Scalar M_pressureDiffusion = -Kp/(fa+1.0e-8)*std::max((1.0-sigma*M_localMean*M_localMean),0.0)*(pressure_R-pressure_L)/(rho_interface*c_interface*c_interface + 1.0e-8);
 
-        Set::Scalar M_interface = M4plus_L + M4minus_R + M_pressureDiffusion;
+        Set::Scalar M_interface = massFluxPolynomialFunction(M_L,1.0) + massFluxPolynomialFunction(M_R,-1.0) + M_pressureDiffusion;
 
         // Calculate the Mass flux...
-        Set::Scalar A = 0.5*(1.0+std::copysign(1.0,(M_interface - 1.0e-10)));
+        Set::Scalar A = 0.5*(1.0+std::copysign(1.0,(M_interface-1e-10)));
         Set::Scalar B = std::abs(1.0-A);  // when A=1: B=0 and vice versa/ then can only be 0 or 1
         Set::Scalar massFlux = c_interface*M_interface*(A * rho_L + B * rho_R);
 
-        // Pressure flux calculations...        
+        // Pressure flux calculations...
+        const Set::Scalar Ku = 0.75; // constant for velocity difference (diffusion) term
+        Set::Scalar P_velocityDiffusion = -Ku*pressureFluxPolynomialFunction(M_L, 1.0, fa)*pressureFluxPolynomialFunction(M_R, -1.0, fa)*(2*rho_interface)*(fa*c_interface)*(vel_R[normal]-vel_L[normal]);
 
-        Set::Scalar P_velocityDiffusion = -Ku*(P5plus_L)*(P5minus_R)*(2*rho_interface)*(fa*c_interface)*(vel_R[normal]-vel_L[normal]);
-
-        Set::Scalar pressureFlux = (P5plus_L)*pressure_L + (P5minus_R)*pressure_R + P_velocityDiffusion;
+        Set::Scalar pressureFlux = pressureFluxPolynomialFunction(M_L, 1.0, fa)*pressure_L + pressureFluxPolynomialFunction(M_R, -1.0, fa)*pressure_R + P_velocityDiffusion;
 
         // Debugging for variables and Fluxes
-        /*Util::ScimitarX_Util::Debug::DebugAUSMupFlux(i, j, k,
+        /*Util::ScimitarX_Util::Debug::DebugAUSMupFlux(i, j, k, num_components,
                                                 rho_L, vel_L[0], vel_L[1], vel_L[2], E_L, pressure_L,
                                                 rho_R, vel_R[0], vel_R[1], vel_R[2], E_R, pressure_R,
-                                                c_L, c_R, c_interface, fa, M_L, M_R, M_inf, M_pressureDiffusion, P_velocityDiffusion,
-                                                M4plus_L,M4minus_R,P5plus_L,P5minus_R,
+                                                c_L, c_R, M_L, M_R,
                                                 M_interface, massFlux, pressureFlux,
                                                 "true"); */
-        
+
             // Assigning Fluxes
         std::vector<Set::Scalar> AUSMupFluxes(num_components, 0.0);
 
+        Set::Scalar C = 0.5*(1.0+std::copysign(1.0,(massFlux-1e-10)));
+        Set::Scalar D = std::abs(1.0 - C);
+
         AUSMupFluxes[solver->variableIndex.DENS] = massFlux;
-        AUSMupFluxes[solver->variableIndex.UVEL + normal] = massFlux * (A*vel_L[normal] + B*vel_R[normal]) +  pressureFlux;
+        AUSMupFluxes[solver->variableIndex.UVEL + normal] = massFlux * (C*vel_L[normal] + D*vel_R[normal]) +  pressureFlux;
 #if AMREX_SPACEDIM >= 2
-        AUSMupFluxes[solver->variableIndex.UVEL + trans1] = massFlux * (A*vel_L[trans1] + B*vel_R[trans1]);
+        AUSMupFluxes[solver->variableIndex.UVEL + trans1] = massFlux * (C*vel_L[trans1] + D*vel_R[trans1]);
 #endif
 #if AMREX_SPACEDIM == 3
-        AUSMupFluxes[solver->variableIndex.UVEL + trans2] = massFlux * (A*vel_L[trans2] + B*vel_R[trans2]);
+        AUSMupFluxes[solver->variableIndex.UVEL + trans2] = massFlux * (C*vel_L[trans2] + D*vel_R[trans2]);
 #endif
-        AUSMupFluxes[solver->variableIndex.IE] = massFlux * (A*E_L + B*E_R) + pressureFlux*(c_interface*M_interface);
-         
-/*
-        Set::Scalar vel_interface = c_interface*M_interface;
-        Set::Scalar magVel_interface = std::abs(c_interface*M_interface);
-
-        AUSMupFluxes[solver->variableIndex.DENS] = 0.5*(vel_interface*(rho_L + rho_R) - magVel_interface*(rho_L - rho_R));
-
-        AUSMupFluxes[solver->variableIndex.UVEL + normal] = 0.5*(vel_interface*(mom_L_normal  + mom_R_normal) - 
-                                                            magVel_interface*(mom_L_normal - mom_R_normal)) +  
-                                                            pressureFlux;
-#if AMREX_SPACEDIM >= 2
-        AUSMupFluxes[solver->variableIndex.UVEL + trans1] = 0.5*(vel_interface*(mom_L_trans1  + mom_R_trans1) -
-                                                            magVel_interface*(mom_L_trans1 - mom_R_trans1));
-#endif
-#if AMREX_SPACEDIM == 3
-        AUSMupFluxes[solver->variableIndex.UVEL + trans2] = 0.5*(vel_interface*(mom_L_trans2  + mom_R_trans2) -
-                                                            magVel_interface*(mom_L_trans2 - mom_R_trans2));
-#endif
-        AUSMupFluxes[solver->variableIndex.IE] = 0.5*(vel_interface*(rhoE_L + rhoE_R) - magVel_interface*(rhoE_L - rhoE_R)) + pressureFlux*vel_interface;
-*/
-
+        AUSMupFluxes[solver->variableIndex.IE] = massFlux * (C * H_total_L + D * H_total_R);
+            
         for (int n = 0; n < num_components; ++n) {
                 TotalFlux_arr(index[0], index[1], index[2], n) = AUSMupFluxes[n];
         }
@@ -1529,7 +1914,7 @@ private:
 Set::Scalar massFluxPolynomialFunction(Set::Scalar M, Set::Scalar sign) const {
 
     // Define switch variables A and B
-    Set::Scalar A = 0.5 * (1.0 + std::copysign(1.0, std::abs(M) - 1.0));
+    Set::Scalar A = 0.5 * (1.0 + std::copysign(1.0, std::abs(M) - 1.0 + 1e-10));
     Set::Scalar B = std::abs(A-1.0);
     // Hence if A is 1, B will be 0, and vice versa
     
@@ -1542,12 +1927,12 @@ Set::Scalar massFluxPolynomialFunction(Set::Scalar M, Set::Scalar sign) const {
 Set::Scalar pressureFluxPolynomialFunction(Set::Scalar M, Set::Scalar sign, Set::Scalar fa) const {
 
     // Define switch variables A and B
-    Set::Scalar A = 0.5 * (1.0 + std::copysign(1.0, std::abs(M)-1.0));
+    Set::Scalar A = 0.5 * (1.0 + std::copysign(1.0, std::abs(M)-1.0 + 1e-10));
     Set::Scalar B = std::abs(A - 1.0);
     // Hence if A is 1, B will be 0, and vice versa
 
     const Set::Scalar alpha = 3.0*(5.0*fa*fa - 4.0)/16.0;
-    Set::Scalar result = A*(0.5*(1.0 + sign * std::copysign(1.0, M))) + B*(0.5*std::pow((M + sign),2) - sign*0.25*M*std::pow((M + sign),2)  + sign*alpha*M*std::pow((M*M - 1),2));
+    Set::Scalar result = A*(0.5*(M+sign*std::abs(M)))/(M + 1.0e-10) + B*(0.25*sign*std::pow((M + sign),2)*(2*sign - M) + sign*alpha*M*std::pow((M*M - 1),2));
     return result;
 }
 
@@ -1558,7 +1943,6 @@ Set::Scalar nonZeroValue(Set::Scalar value) const {
 }
 
 };
-
 
 }  // namespace Numeric
 

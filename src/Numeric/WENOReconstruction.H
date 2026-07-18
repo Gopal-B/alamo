@@ -939,7 +939,6 @@ void ReconstructVariables(
                 LeftStates_arr(index[0], index[1], index[2], n) = leftvalue_reconstructed(n);
             }
 
-            // ********** CHANGE - BEGIN **************
 
             //  Compute Right State (q_R) at face 'iface' 
             Set::MultiMatrix stencil_R_matrix(Traits::TotalPoints, num_components);
@@ -956,7 +955,6 @@ void ReconstructVariables(
 
             // To compute the right state with a left-biased policy, we reverse the stencil data.
             Set::MultiMatrix input_stencil_R = stencil_R_matrix.colwise().reverse();
-
             if (useCharacteristic) {
                 // The transform should be on the original, non-reversed stencil data for physical correctness.
                 Set::MultiMatrix temp_transform_stencil = stencil_R_matrix;
@@ -975,12 +973,12 @@ void ReconstructVariables(
         });
     }
 
-
+    // Synchronize to ensure all left states are computed
     LeftStates.FillBoundary();
     RightStates.FillBoundary();
 }
 
-};          // ********** CHANGE - END ************
+};
 
 //==============================================================================
 // Convenience type aliases for common WENO variants

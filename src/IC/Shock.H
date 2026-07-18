@@ -64,8 +64,14 @@ private:
     std::vector<Set::Scalar> uvel_zone;
     std::vector<Set::Scalar> vvel_zone;
     std::vector<Set::Scalar> wvel_zone;
+    // --- ADDITION ---
+    std::vector<Set::Scalar> alpha_zone;
+    std::vector<Set::Scalar> rho1_zone;
+    std::vector<Set::Scalar> rho2_zone;
     // pressure initialization variables
     std::vector<Set::Scalar> pressure_zone;
+    std::vector<std::string> rho1_expr;      // optional explicit rho1
+    std::vector<std::string> rho2_expr;      // optional explicit rho2
 
     // Expression strings - to store directly from input, similar to density_zone format
     std::vector<std::string> density_expr;
@@ -73,6 +79,8 @@ private:
     std::vector<std::string> uvel_expr;
     std::vector<std::string> vvel_expr;
     std::vector<std::string> wvel_expr;    
+    // --- ADDITION ---
+    std::vector<std::string> alpha_expr;
     
     // Parsers and executors for expressions (similar to Expression class)
     std::vector<amrex::Parser> density_parser;
@@ -80,12 +88,21 @@ private:
     std::vector<amrex::Parser> uvel_parser;
     std::vector<amrex::Parser> vvel_parser;
     std::vector<amrex::Parser> wvel_parser;
+    // --- ADDITION ---
+    std::vector<amrex::Parser> alpha_parser;
+
+
+    std::vector<amrex::ParserExecutor<4>> rho1_func;
+    std::vector<amrex::ParserExecutor<4>> rho2_func;
+    
     
     std::vector<amrex::ParserExecutor<4>> density_func;
     std::vector<amrex::ParserExecutor<4>> pressure_func;
     std::vector<amrex::ParserExecutor<4>> uvel_func;
     std::vector<amrex::ParserExecutor<4>> vvel_func;
     std::vector<amrex::ParserExecutor<4>> wvel_func;
+    // --- ADDITION ---
+    std::vector<amrex::ParserExecutor<4>> alpha_func;
 
     // Helper method to compile a parser from an expression string
     void SetupParser(std::vector<amrex::Parser>& parser, 

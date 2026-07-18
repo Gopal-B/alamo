@@ -16,7 +16,7 @@
 
 namespace Numeric {
 
-/*// Helper function to compute face indices for a control volume's flux calculation
+// Helper function to compute face indices for a control volume's flux calculation
 AMREX_GPU_DEVICE
 inline void GetFaceIndices(int i, int j, int k, amrex::IntVect& west_face, amrex::IntVect& east_face,
                             amrex::IntVect& south_face, amrex::IntVect& north_face,
@@ -29,156 +29,66 @@ inline void GetFaceIndices(int i, int j, int k, amrex::IntVect& west_face, amrex
     south_face = amrex::IntVect(AMREX_D_DECL(i, j - 1, k));
     north_face = amrex::IntVect(AMREX_D_DECL(i, j, k));
 
-#if (AMREX_SPACEDIM == 3)
     // Bottom and top face indices for the z-direction
     bottom_face = amrex::IntVect(AMREX_D_DECL(i, j, k - 1));
     top_face = amrex::IntVect(AMREX_D_DECL(i, j, k));
-#else
-    bottom_face = amrex::IntVect(AMREX_D_DECL(0, 0, 0));  // Placeholder for 2D
-    top_face = amrex::IntVect(AMREX_D_DECL(0, 0, 0));     // Placeholder for 2D
-#endif
-}*/
+}
 
-// Abstract interface for time-stepping schemes
 template <typename IntegratorDerivedClass>
 class TimeSteppingScheme {
 public:
-    virtual void ComputeSubStep(int lev, Set::Scalar dt, int stage, IntegratorDerivedClass* solver) = 0;
-    virtual int GetNumberOfStages() const = 0;
     virtual ~TimeSteppingScheme() = default;
+
+    virtual void ComputeSubStep(int lev, Set::Scalar dt, int stage, IntegratorDerivedClass* solver) = 0;
+    
+    // Method to return the number of stages for the scheme
+    virtual int GetNumberOfStages() const = 0;
 };
 
-// TimeStepper base class (like FluxHandler)
-template <typename IntegratorDerivedClass>
-class TimeStepper {
-private:
-    std::shared_ptr<TimeSteppingScheme<IntegratorDerivedClass>> scheme;  // Shared pointer to time-stepping scheme
-
-public:
-    TimeStepper() = default;
-
-    // Set the time-stepping scheme
-    void SetTimeSteppingScheme(const std::shared_ptr<TimeSteppingScheme<IntegratorDerivedClass>>& newScheme) {
-        scheme = newScheme;
-    }
-
-    // Call the scheme's ComputeSubStep directly
-    void ComputeSubStep(int lev, Set::Scalar dt, int stage, IntegratorDerivedClass* solver) {
-        if (!scheme) {
-            Util::Abort(__FILE__, __func__, __LINE__, "TimeSteppingScheme is not set.");
-        }
-        scheme->ComputeSubStep(lev, dt, stage, solver);
-    }
-
-    int GetNumberOfStages() const {
-        if (!scheme) {
-            Util::Abort(__FILE__, __func__, __LINE__, "TimeSteppingScheme is not set.");
-        }
-        return scheme->GetNumberOfStages();
-    }
-};
-
-// EulerForwardScheme
+// Forward Euler time stepping scheme
 template <typename IntegratorDerivedClass>
 class EulerForwardScheme : public TimeSteppingScheme<IntegratorDerivedClass> {
 public:
-    void ComputeSubStep(int lev, Set::Scalar dt, int stage, IntegratorDerivedClass* solver) override {
-        if (stage != 0) {
-            Util::Abort(__FILE__, __func__, __LINE__, "Invalid stage for EulerForward: only one stage exists.");
-        }
+    int GetNumberOfStages() const override { return 1; }
 
-        //Util::ScimitarX_Util::Debug debug;
-        //debug.SetTargetDebugLocationIndices(101, 0, 0);
-        //debug.SetTargetDebugLocation(0.49, 0.12, 0.0, solver->geom[lev]);
+    void ComputeSubStep(int lev, Set::Scalar dt, int /*stage*/, IntegratorDerivedClass* solver) override {
+        
+        const Set::Scalar* DX = solver->geom[lev].CellSize();
+        
+        // [DI MODIFICATION] Check for mixture model
+        bool use_source_term = (solver->fluid_mixture != nullptr);
+        int alpha_idx = -1;
+        if (use_source_term) alpha_idx = solver->variableIndex.ALPHA;
 
-        const Set::Scalar* DX = solver->geom[lev].CellSize();  // Grid spacing
+        for (amrex::MFIter mfi(*solver->QVec_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const amrex::Box& bx = mfi.tilebox();
 
-        //for (amrex::MFIter mfi(*solver->QVec_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        for (amrex::MFIter mfi(*solver->QVec_mf[lev], false); mfi.isValid(); ++mfi) {
-            const amrex::Box& bx = mfi.validbox();  // Valid region of the box
-            auto const& q_arr = solver->QVec_mf.Patch(lev, mfi);  // Updated conserved variables
-            auto const& q_old_arr = solver->QVec_old_mf.Patch(lev, mfi);  // Old conserved variables
-            auto const& xflux_arr = solver->XFlux_mf.Patch(lev, mfi);  // X-direction flux
-            auto const& yflux_arr = solver->YFlux_mf.Patch(lev, mfi);  // Y-direction flux
-#if (AMREX_SPACEDIM == 3)
-            auto const& zflux_arr = solver->ZFlux_mf.Patch(lev, mfi);  // Z-direction flux
+            auto const& q_arr = solver->QVec_mf[lev]->array(mfi);
+            auto const& q_old_arr = solver->QVec_old_mf[lev]->array(mfi);
+            auto const& xflux_arr = solver->XFlux_mf[lev]->array(mfi);
+#if (AMREX_SPACEDIM >= 2)
+            auto const& yflux_arr = solver->YFlux_mf[lev]->array(mfi);
 #endif
-            auto const& sourceTerm_arr = solver->SourceTermVec.Patch(lev, mfi);  // Source-term derivatives from Viscous stress
-
-            // Parallel loop over cells in the valid box
-            amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
-                for (int n = 0; n < solver->number_of_components; ++n) {
-                    // **Get Face Indices for the Control Volume**
-                    //amrex::IntVect west_face, east_face, south_face, north_face, bottom_face, top_face;
-                    //GetFaceIndices(i, j, k, west_face, east_face, south_face, north_face, bottom_face, top_face);
-
-                    // **Flux Divergence Computation**
-                    Set::Scalar flux_div = 0.0;
-
-                    // X-direction flux divergence
-                    flux_div += (xflux_arr(i, j, k, n) - xflux_arr(i-1, j, k, n)) / DX[0];
-
-                    // Y-direction flux divergence
-                    flux_div += (yflux_arr(i, j, k, n) - yflux_arr(i, j-1, k, n)) / DX[1];
-
 #if (AMREX_SPACEDIM == 3)
-                    // Z-direction flux divergence
-                    flux_div += (zflux_arr(i, j, k, n) - zflux_arr(i, j, k-1, n)) / DX[2];
+            auto const& zflux_arr = solver->ZFlux_mf[lev]->array(mfi);
 #endif
 
-                    // Update conserved variable using Euler Forward step
-                    Set::Scalar q_old = q_old_arr(i, j, k, n);
-                    q_arr(i, j, k, n) = q_old - dt * (flux_div - sourceTerm_arr(i, j, k, n));
-
-                    //Debug output
-                    /* debug.DebugEulerForwardStep(i, j, k, xflux_arr(i,j,k,n), xflux_arr(i-1,j,k,n),
-                                                yflux_arr(i,j,k,n), yflux_arr(i,j-1,k,n),
-                                                0.0,
-                                                0.0,
-                                                q_old, dt, "Euler Forward Substep", true); */               
-                }
-            });
-        }
-    }
-
-    int GetNumberOfStages() const override {
-        return 1;  // Euler Forward has only one stage
-    }
-};
-
-// RK3 Scheme
-template <typename IntegratorDerivedClass>
-class RK3Scheme : public TimeSteppingScheme<IntegratorDerivedClass> {
-public:
-    struct RK3Constants {
-        static constexpr int stages = 3;  // RK3 has 3 stages
-        static constexpr Set::Scalar a[] = {1.0, 0.75, 1.0 / 3.0};  // Coefficients
-        static constexpr Set::Scalar b[] = {0.0, 0.25, 2.0 / 3.0};
-        static constexpr Set::Scalar c[] = {1.0, 0.25, 2.0 / 3.0};
-    };
-
-    void ComputeSubStep(int lev, Set::Scalar dt, int stage, IntegratorDerivedClass* solver) override {
-        if (stage >= RK3Constants::stages) {
-            Util::Abort(__FILE__, __func__, __LINE__, "Invalid stage for RK3.");
-        }
-
-        const Set::Scalar* DX = solver->geom[lev].CellSize();  // Grid spacing
-
-        //for (amrex::MFIter mfi(*solver->QVec_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        for (amrex::MFIter mfi(*solver->QVec_mf[lev], false); mfi.isValid(); ++mfi) {
-            const amrex::Box& bx = mfi.validbox();
-            auto const& q_arr = solver->QVec_mf.Patch(lev, mfi);  // Updated conserved variables
-            auto const& q_old_arr = solver->QVec_old_mf.Patch(lev, mfi);  // Old conserved variables
-            auto const& xflux_arr = solver->XFlux_mf.Patch(lev, mfi);  // X-direction flux
-            auto const& yflux_arr = solver->YFlux_mf.Patch(lev, mfi);  // Y-direction flux
-#if (AMREX_SPACEDIM == 3)
-            auto const& zflux_arr = solver->ZFlux_mf.Patch(lev, mfi);  // Z-direction flux
+            // [DI MODIFICATION] Access Face Velocities for Source Term
+            amrex::Array4<Set::Scalar> u_face_arr, v_face_arr, w_face_arr;
+            if (use_source_term) {
+                u_face_arr = solver->UFace_mf[lev]->array(mfi);
+#if (AMREX_SPACEDIM >= 2)
+                v_face_arr = solver->VFace_mf[lev]->array(mfi);
 #endif
-            auto const& sourceTerm_arr = solver->SourceTermVec.Patch(lev, mfi);  // Source-term derivatives from Viscous stress
+#if (AMREX_SPACEDIM == 3)
+                w_face_arr = solver->WFace_mf[lev]->array(mfi);
+#endif
+            }
+
+            int ncomp = solver->number_of_components;
 
             amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
-                for (int n = 0; n < solver->number_of_components; ++n) {
-                    // **Flux Divergence Computation**
+                for (int n = 0; n < ncomp; ++n) {
                     Set::Scalar flux_div = 0.0;
                     Set::Scalar xflux_right = 0.0, xflux_left = 0.0;
                     Set::Scalar yflux_top = 0.0, yflux_bottom = 0.0;
@@ -203,20 +113,157 @@ public:
                         flux_div += (zflux_front - zflux_back) / DX[2];
 #endif
 
-                    // **Runge-Kutta 3rd order update formula**
-                    q_arr(i, j, k, n) = RK3Constants::a[stage] * q_old_arr(i, j, k, n) +
-                                        RK3Constants::b[stage] * q_arr(i, j, k, n) -
-                                        RK3Constants::c[stage] * dt * (flux_div - sourceTerm_arr(i, j, k, n));
+                    // [DI MODIFICATION] Add Source Term for Alpha Equation
+                    // Equation: d(alpha)/dt + div(alpha*u) = alpha * div(u)
+                    // Update: alpha_new = alpha_old - dt * (div(Flux) - Source)
+                    if (use_source_term && n == alpha_idx) {
+                        Set::Scalar div_u = (u_face_arr(i, j, k, 0) - u_face_arr(i-1, j, k, 0)) / DX[0];
+#if (AMREX_SPACEDIM >= 2)
+                        div_u += (v_face_arr(i, j, k, 0) - v_face_arr(i, j-1, k, 0)) / DX[1];
+#endif
+#if (AMREX_SPACEDIM == 3)
+                        div_u += (w_face_arr(i, j, k, 0) - w_face_arr(i, j, k-1, 0)) / DX[2];
+#endif
+                        Set::Scalar alpha = q_old_arr(i, j, k, alpha_idx);
+                        Set::Scalar source_term = alpha * div_u;
+                        
+                        flux_div -= source_term;
+                    }
+                    // --- END DI MODIFICATION ---
+
+                    // Forward Euler update
+                    q_arr(i, j, k, n) = q_old_arr(i, j, k, n) - dt * flux_div;
                 }
             });
         }
     }
+};
 
-    int GetNumberOfStages() const override {
-        return RK3Constants::stages;  // RK3 has 3 stages
+// RK3 time stepping scheme
+struct RK3Constants {
+    static constexpr Set::Scalar a[] = {0.0, 3.0/4.0, 1.0/3.0};
+    static constexpr Set::Scalar b[] = {1.0, 1.0/4.0, 2.0/3.0};
+};
+
+template <typename IntegratorDerivedClass>
+class RK3Scheme : public TimeSteppingScheme<IntegratorDerivedClass> {
+public:
+    int GetNumberOfStages() const override { return 3; }
+
+    void ComputeSubStep(int lev, Set::Scalar dt, int stage, IntegratorDerivedClass* solver) override {
+        
+        const Set::Scalar* DX = solver->geom[lev].CellSize();
+
+        // [DI MODIFICATION] Check for mixture model
+        bool use_source_term = (solver->fluid_mixture != nullptr);
+        int alpha_idx = -1;
+        if (use_source_term) alpha_idx = solver->variableIndex.ALPHA;
+
+        for (amrex::MFIter mfi(*solver->QVec_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const amrex::Box& bx = mfi.tilebox();
+
+            auto const& q_arr = solver->QVec_mf[lev]->array(mfi);
+            auto const& q_old_arr = solver->QVec_old_mf[lev]->array(mfi);
+            auto const& xflux_arr = solver->XFlux_mf[lev]->array(mfi);
+#if (AMREX_SPACEDIM >= 2)
+            auto const& yflux_arr = solver->YFlux_mf[lev]->array(mfi);
+#endif
+#if (AMREX_SPACEDIM == 3)
+            auto const& zflux_arr = solver->ZFlux_mf[lev]->array(mfi);
+#endif
+
+            // [DI MODIFICATION] Access Face Velocities
+            amrex::Array4<Set::Scalar> u_face_arr, v_face_arr, w_face_arr;
+            if (use_source_term) {
+                u_face_arr = solver->UFace_mf[lev]->array(mfi);
+#if (AMREX_SPACEDIM >= 2)
+                v_face_arr = solver->VFace_mf[lev]->array(mfi);
+#endif
+#if (AMREX_SPACEDIM == 3)
+                w_face_arr = solver->WFace_mf[lev]->array(mfi);
+#endif
+            }
+
+            int ncomp = solver->number_of_components;
+
+            amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                for (int n = 0; n < ncomp; ++n) {
+                    Set::Scalar flux_div = 0.0;
+                    Set::Scalar xflux_right = 0.0, xflux_left = 0.0;
+                    Set::Scalar yflux_top = 0.0, yflux_bottom = 0.0;
+#if (AMREX_SPACEDIM == 3)
+                    Set::Scalar zflux_front = 0.0, zflux_back = 0.0;
+#endif
+
+                    // X-direction flux divergence
+                        xflux_right = xflux_arr(i, j, k, n);  // Right face flux
+                        xflux_left = xflux_arr(i-1, j, k, n);  // Left face flux
+                        flux_div += (xflux_right - xflux_left) / DX[0];
+
+                    // Y-direction flux divergence (if 2D or 3D)
+                        yflux_top = yflux_arr(i, j, k, n);  // Top face flux
+                        yflux_bottom = yflux_arr(i, j-1, k, n);  // Bottom face flux
+                        flux_div += (yflux_top - yflux_bottom) / DX[1];
+
+                    // Z-direction flux divergence (if 3D)
+#if (AMREX_SPACEDIM == 3)
+                        zflux_front = zflux_arr(i, j, k, n);  // Front face flux
+                        zflux_back = zflux_arr(i, j, k-1, n);  // Back face flux
+                        flux_div += (zflux_front - zflux_back) / DX[2];
+#endif
+
+                    // [DI MODIFICATION] Add Source Term for Alpha Equation
+                    // Note: For RK3, we use the intermediate 'q_arr' alpha for consistency in stages
+                    if (use_source_term && n == alpha_idx) {
+                        Set::Scalar div_u = (u_face_arr(i, j, k, 0) - u_face_arr(i-1, j, k, 0)) / DX[0];
+#if (AMREX_SPACEDIM >= 2)
+                        div_u += (v_face_arr(i, j, k, 0) - v_face_arr(i, j-1, k, 0)) / DX[1];
+#endif
+#if (AMREX_SPACEDIM == 3)
+                        div_u += (w_face_arr(i, j, k, 0) - w_face_arr(i, j, k-1, 0)) / DX[2];
+#endif
+                        Set::Scalar alpha = q_arr(i, j, k, alpha_idx);
+                        Set::Scalar source_term = alpha * div_u;
+                        
+                        flux_div -= source_term;
+                    }
+                    // --- END DI MODIFICATION ---
+
+                    // **Runge-Kutta 3rd order update formula**
+                    q_arr(i, j, k, n) = RK3Constants::a[stage] * q_old_arr(i, j, k, n) +\
+                                        RK3Constants::b[stage] * q_arr(i, j, k, n) -\
+                                        dt * RK3Constants::b[stage] * flux_div;
+                }
+            });
+        }
     }
 };
 
-}  // namespace Numeric
+template <typename IntegratorDerivedClass>
+class TimeStepper {
+public:
+    void SetTimeSteppingScheme(std::shared_ptr<TimeSteppingScheme<IntegratorDerivedClass>> scheme) {
+        time_stepping_scheme = std::move(scheme);
+    }
 
-#endif  // NUMERIC_TIMESTEPPER_H_
+    void ComputeSubStep(int lev, Set::Scalar dt, int stage, IntegratorDerivedClass* solver) {
+        if (!time_stepping_scheme) {
+            Util::Abort(INFO, "TimeStepper: No time stepping scheme set.");
+        }
+        time_stepping_scheme->ComputeSubStep(lev, dt, stage, solver);
+    }
+
+    int GetNumberOfStages() const {
+        if (!time_stepping_scheme) {
+            return 0; // Or handle error appropriately
+        }
+        return time_stepping_scheme->GetNumberOfStages();
+    }
+
+private:
+    std::shared_ptr<TimeSteppingScheme<IntegratorDerivedClass>> time_stepping_scheme;
+};
+
+} // namespace Numeric
+
+#endif // NUMERIC_TIMESTEPPER_H_

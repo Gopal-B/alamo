@@ -43,6 +43,14 @@ public:
         int SYZ = -1;                    // Index for Deviatoric stress YZ
         int EPSBAR = -1;                 // Index for Effective plastic strain
         int IE_ELASTIC = -1;             // Index for Elastic Internal Energy  
+
+        int M1 = -1;                     // Index for m1
+        int M2 = -1;                     // Index for m2
+        int MOMX = -1;                   // Index for momx
+        int MOMY = -1;                   // Index for momy
+        int MOMZ = -1;                   // Index for momz
+        int ETOT = -1;                   // Index for Etot
+        int ALPHA = -1;                  // Index for alpha
     };
     
     // Add a static instance of the struct (similar to ScimitarX's static member)
@@ -57,6 +65,14 @@ public:
         if (indices.VVEL >= 0) variableIndices.VVEL = indices.VVEL;
         if (indices.WVEL >= 0) variableIndices.WVEL = indices.WVEL;
         if (indices.IE >= 0) variableIndices.IE = indices.IE;
+
+        if (indices.M1 >= 0) variableIndices.M1 = indices.M1;
+        if (indices.M2 >= 0) variableIndices.M2 = indices.M2;
+        if (indices.MOMX >= 0) variableIndices.MOMX = indices.MOMX;
+        if (indices.MOMY >= 0) variableIndices.MOMY = indices.MOMY;
+        if (indices.MOMZ >= 0) variableIndices.MOMZ = indices.MOMZ;
+        if (indices.ETOT >= 0) variableIndices.ETOT = indices.ETOT;
+        if (indices.ALPHA >= 0) variableIndices.ALPHA = indices.ALPHA;
         
         // ElastoPlastic specific variables - only copy if they're valid
         if (indices.SXX >= 0) variableIndices.SXX = indices.SXX;
