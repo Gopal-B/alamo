@@ -10,9 +10,7 @@
 namespace Numeric {
 namespace FiveEquation {
 
-// =============================================================
-// Capabilities
-// =============================================================
+
 
 std::string FiveEquationCapabilities::getIdentifier() const { return "FiveEquationModel"; }
 
@@ -118,12 +116,6 @@ FiveEquationVariableAccessor::getRequiredGhostCells(
     return (reconstructionType == FluxReconstructionType::WENO) ? 4 : 1;
 }
 
-// =============================================================
-// DI helpers (single source of truth): QVec -> primitives
-// Primitive layout used for reconstruction:
-//   W = [m1, m2, u, v, w, p, alpha]  stored in slots:
-//   [M1, M2, MOMX, MOMY, MOMZ, ETOT, ALPHA]
-// =============================================================
 
 static AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 void ConsToPrim_DI5(
@@ -182,7 +174,7 @@ void ConsToPrim_DI5(
     Set::Scalar ie_mix = E_spec - ke;
     ie_mix = amrex::max(ie_mix, tiny);
 
-    // Closure for pressure and sound speed (paper’s EOS closure; your mixture model)
+  
     p = mixture_model->closure_pressure(rho, ie_mix, alpha);
     p = amrex::max(p, tiny);
 
@@ -190,22 +182,6 @@ void ConsToPrim_DI5(
     c = amrex::max(c, Set::Scalar(1.0e-12));
 }
 
-// =============================================================
-// Characteristic matrices for DI5 (primitive-variable form)
-//
-// We use a 7×7 eigenbasis consistent with the paper’s Appendix-B structure:
-// - two acoustic waves: u_n ± c  (couple u_n, p, and rho=m1+m2)
-// - five linearly-degenerate waves: u_n
-//   (advect m1, m2, tangential velocities, and alpha)
-//
-// Primitive ordering in our code buffer:
-//   W = [m1, m2, u, v, w, p, alpha]
-//
-// Characteristic ordering we store into the 7 component slots (internally):
-//   ξ = [ξ_ac-, ξ_m1, ξ_m2, ξ_shear1, ξ_shear2, ξ_alpha, ξ_ac+]
-// mapped to slots:
-//   [M1,   M2,   MOMX,   MOMY,      MOMZ,      ETOT,     ALPHA]
-// =============================================================
 
 static AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 void BuildLR_DI5_Prim(
@@ -234,16 +210,7 @@ void BuildLR_DI5_Prim(
         in  = momz_idx; it1 = momx_idx; it2 = momy_idx;
     }
 
-    // --- Right eigenvectors Q (columns) for ξ ordering:
-    // col 0: acoustic (u_n - c)
-    // col 1: advected m1
-    // col 2: advected m2
-    // col 3: shear (tangential 1)
-    // col 4: shear (tangential 2)
-    // col 5: advected alpha
-    // col 6: acoustic (u_n + c)
 
-    // Acoustic-
     R(m1_idx, 0) = 1.0;
     R(m2_idx, 0) = 1.0;
     R(in,     0) = -c / rho;
@@ -255,7 +222,6 @@ void BuildLR_DI5_Prim(
     // m2 wave
     R(m2_idx, 2) = 1.0;
 
-    // Shear waves (only meaningful if the component exists)
 #if AMREX_SPACEDIM >= 2
     R(it1,    3) = 1.0;
 #else
@@ -276,19 +242,7 @@ void BuildLR_DI5_Prim(
     R(in,     6) = +c / rho;
     R(p_idx,  6) = c * c;
 
-    // --- Left eigenvectors Q^{-1} (rows) for the same ξ ordering.
-    //
-    // Using the consistent primitive relations (matching Appendix-B structure):
-    // ξ_ac- = 0.5*( p/c^2 - rho*u_n/c )
-    // ξ_ac+ = 0.5*( p/c^2 + rho*u_n/c )
-    // ξ_m1  = m1 - p/c^2
-    // ξ_m2  = m2 - p/c^2
-    // ξ_shear = tangential velocity component
-    // ξ_alpha = alpha
-    //
-    // These choices yield L*R = I with the above R columns.
-
-    // acoustic-
+  
     L(0, in)   = -rho / (2.0 * c);
     L(0, p_idx)=  1.0 / (2.0 * c * c);
 
@@ -316,12 +270,6 @@ void BuildLR_DI5_Prim(
     L(6, in)   = +rho / (2.0 * c);
     L(6, p_idx)=  1.0 / (2.0 * c * c);
 }
-
-// =============================================================
-// CopyVariables
-// Writes the primitive reconstruction buffer:
-//   [m1, m2, u, v, w, p, alpha] into slots [M1,M2,MOM*,ETOT,ALPHA]
-// =============================================================
 
 void FiveEquationVariableAccessor::CopyVariables(
     int /*direction*/,
@@ -381,11 +329,6 @@ void FiveEquationVariableAccessor::CopyVariables(
 
     VariableBuffer.FillBoundary();
 }
-
-// =============================================================
-// CopyFluxes: cell-centered physical fluxes from QVec (conserved).
-// (Kept consistent with your DI5 conservative form.)
-// =============================================================
 
 void FiveEquationVariableAccessor::CopyFluxes(
     int direction,
@@ -492,11 +435,6 @@ void FiveEquationVariableAccessor::CopyFluxes(
     CellFluxBuffer.FillBoundary();
 }
 
-// =============================================================
-// PopulateAverageStates (face-centered):
-// Builds Wi+1/2 = 0.5*(Wi + Wi+1) in the *same primitive set*
-// used for characteristic projection, and stores c in ETOT slot.
-// =============================================================
 
 void FiveEquationVariableAccessor::PopulateAverageStates(
     int direction,
@@ -599,24 +537,6 @@ void FiveEquationVariableAccessor::PopulateAverageStates(
     AverageStateBuffer.FillBoundary();
 }
 
-// =============================================================
-// TransformStencilToCharacteristic (paper Eq. 19):
-// ξ = Q^{-1}(W_face) * W_stencil
-// =============================================================
-// =============================================================
-// Dimension-aware characteristic matrices for DI5 primitives
-// W ordering in the reconstruction buffer (size N):
-//   1D: [m1, m2, u, p, alpha]
-//   2D: [m1, m2, u, v, p, alpha]
-//   3D: [m1, m2, u, v, w, p, alpha]
-//
-// We store characteristic variables ξ in the same component slots
-// (i.e. we overwrite "m1 slot" etc.), but the mapping is local.
-// ξ ordering:
-//   1D: [ac-, m1, m2, alpha, ac+]
-//   2D: [ac-, m1, m2, shear, alpha, ac+]
-//   3D: [ac-, m1, m2, shear1, shear2, alpha, ac+]
-// =============================================================
 
 static AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 int DI5_NumVars(int spacedim) {
@@ -696,21 +616,7 @@ void BuildLR_DI5_Prim_Dynamic(
         i_acp = 6;
     }
 
-    // ----------------------------
-    // Right eigenvectors R (columns) -- DualShockMV Appendix-B (up to scaling and re-ordering)
-    // ----------------------------
-    // We use the same eigenvalues (u_n - c, u_n (×N-2), u_n + c).
-    // The primitive Jacobian in Appendix-B couples the phase partial densities (m1,m2) to the
-    // velocity divergence. The acoustic eigenvectors therefore scale with m1 and m2.
-    //
-    // IMPORTANT: This routine only receives (rho,c). The full Appendix-B eigenvectors also
-    // depend on (m1,m2). We therefore build a basis whose inverse has the same compact form as
-    // Appendix-B after eliminating alpha and re-ordering (see comment block above), and we
-    // inject the (m1,m2) dependence later in the caller via avg_state.
 
-    // acoustic-  (u_n - c)
-    // dm1, dm2 entries are set in the caller using m1A,m2A (face-averaged) to match Appendix-B:
-    //   r_-: dm1 = -m1/(2c), dm2 = -m2/(2c), du_n=1/2, dp=-(rho*c)/2
     R(in,     i_acm) =  0.5;
     R(p_idx,  i_acm) = -0.5 * rho * c;
 
@@ -739,8 +645,7 @@ void BuildLR_DI5_Prim_Dynamic(
     // ----------------------------
     // Left eigenvectors L = Q^{-1} (rows)
     // ----------------------------
-    // After re-ordering to our buffer and removing the (advected) alpha equation from the front,
-    // Appendix-B yields the compact inverse relations:
+
     //   xi_-  = u_n - p/(rho*c)
     //   xi_+  = u_n + p/(rho*c)
     //   xi_m1 = m1 - (m1/(rho*c^2))*p
@@ -806,8 +711,7 @@ Set::MultiMatrix FiveEquationVariableAccessor::TransformStencilToCharacteristic(
         L, R
     );
 
-    // Inject the (m1,m2) dependence into the Appendix-B eigenbasis (see BuildLR_DI5_Prim_Dynamic).
-    // Determine characteristic indices in the ξ vector (consistent with BuildLR_DI5_Prim_Dynamic).
+
     const int i_acm = 0;
     const int i_m1  = 1;
     const int i_m2  = 2;
@@ -872,7 +776,7 @@ Set::MultiVector FiveEquationVariableAccessor::TransformFromCharacteristic(
         L, R
     );
 
-    // Inject the (m1,m2) dependence into the Appendix-B eigenbasis.
+   
     const int i_acm = 0;
     const int i_m1  = 1;
     const int i_m2  = 2;
@@ -901,9 +805,6 @@ Set::MultiVector FiveEquationVariableAccessor::TransformFromCharacteristic(
 
     return W; // same primitive slot ordering as VariableBuffer uses
 }
-// =============================================================
-// StoreDirectionalFlux
-// =============================================================
 
 void FiveEquationVariableAccessor::StoreDirectionalFlux(
     int direction,
