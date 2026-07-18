@@ -6,6 +6,7 @@
 #include "IC/Shock.H"
 #include "IC/Riemann2D.H"
 #include "Model/Fluid/Fluid.H"
+#include "IC/ShockDroplet.H"
 #include "Numeric/Stencil.H"
 #include "Numeric/NumericTypes.H"
 #include "Numeric/NumericFactory.H"
@@ -274,93 +275,111 @@ inline void ScimitarX::ComputeConservedVariables<ScimitarX::SolverType::SolveFiv
         });
     }
 }
-
 template <>
 inline void ScimitarX::UpdateSolutions<ScimitarX::SolverType::SolveFiveEquationModel>(int lev) {
     const auto* mixture_model = fluid_mixture.get();
     AMREX_ALWAYS_ASSERT(mixture_model != nullptr);
 
+    const Set::Scalar m_floor = di5_partial_density_floor;
+    const Set::Scalar a_floor = di5_alpha_floor;
+    const Set::Scalar p_floor = di5_pressure_floor;
+
     for (amrex::MFIter mfi(*QVec_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
         const amrex::Box& bx = mfi.validbox();
 
-        auto const& q_arr = QVec_mf.Patch(lev, mfi);
-        auto const& p_arr = PVec_mf.Patch(lev, mfi);
-        auto const& pressure_arr = Pressure_mf.Patch(lev, mfi);
-        
+        auto q_arr = QVec_mf.Patch(lev, mfi);
+        auto p_arr = PVec_mf.Patch(lev, mfi);
+        auto pressure_arr = Pressure_mf.Patch(lev, mfi);
+
         const int m1_idx = variableIndex.M1;
         const int m2_idx = variableIndex.M2;
         const int momx_idx = variableIndex.MOMX;
+#if AMREX_SPACEDIM >= 2
         const int momy_idx = variableIndex.MOMY;
-        [[maybe_unused]] const int momz_idx = variableIndex.MOMZ;
+#endif
+#if AMREX_SPACEDIM == 3
+        const int momz_idx = variableIndex.MOMZ;
+#endif
         const int etot_idx = variableIndex.ETOT;
         const int alpha_idx = variableIndex.ALPHA;
 
         amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
-            // Read Conserved
-            Set::Scalar m1 = q_arr(i, j, k, m1_idx);
-            Set::Scalar m2 = q_arr(i, j, k, m2_idx);
-            Set::Scalar momx = q_arr(i, j, k, momx_idx);
+
+            Set::Scalar m1 = amrex::max(q_arr(i,j,k,m1_idx), m_floor);
+            Set::Scalar m2 = amrex::max(q_arr(i,j,k,m2_idx), m_floor);
+
+            Set::Scalar alpha = amrex::min(Set::Scalar(1.0) - a_floor,
+                                           amrex::max(a_floor, q_arr(i,j,k,alpha_idx)));
+
+            const Set::Scalar rho = amrex::max(m1 + m2, m_floor);
+
+            Set::Scalar momx = q_arr(i,j,k,momx_idx);
 #if AMREX_SPACEDIM >= 2
-            Set::Scalar momy = q_arr(i, j, k, momy_idx);
+            Set::Scalar momy = q_arr(i,j,k,momy_idx);
 #else
             Set::Scalar momy = 0.0;
 #endif
 #if AMREX_SPACEDIM == 3
-            Set::Scalar momz = q_arr(i, j, k, momz_idx);
+            Set::Scalar momz = q_arr(i,j,k,momz_idx);
 #else
             Set::Scalar momz = 0.0;
 #endif
-            Set::Scalar Etot = q_arr(i, j, k, etot_idx);
-            Set::Scalar alpha = q_arr(i, j, k, alpha_idx);
+            Set::Scalar Etot = q_arr(i,j,k,etot_idx);
 
-            // Floors
-            m1 = amrex::max(m1, 1e-12);
-            m2 = amrex::max(m2, 1e-12);
-            alpha = amrex::min(amrex::max(alpha, 0.0), 1.0);
+            const Set::Scalar u = momx / rho;
+            const Set::Scalar v = momy / rho;
+            const Set::Scalar w = momz / rho;
 
-            // Recover Primitives
-            const Set::Scalar rho = amrex::max(m1 + m2, 1e-14);
+            const Set::Scalar ke = Set::Scalar(0.5) * (u*u + v*v + w*w);
 
-            Set::Scalar u = momx / rho;
-            Set::Scalar v = momy / rho;
-            Set::Scalar w = momz / rho;
+            Set::Scalar ie_mix = Etot / rho - ke;
 
-            Set::Scalar ke = 0.5 * (u*u + v*v + w*w);
-            Set::Scalar E_spec = Etot / rho;
-            Set::Scalar ie_mix = E_spec - ke;
-            ie_mix = amrex::max(ie_mix, 1e-12);
+            const Set::Scalar ie_min =
+                mixture_model->mixture_internal_energy(rho, p_floor, alpha);
 
-            const Set::Scalar a  = amrex::max(alpha, 1e-12);
-            const Set::Scalar ia = amrex::max(1.0 - alpha, 1e-12);
-
-            Set::Scalar rho1 = m1 / a;
-            Set::Scalar rho2 = m2 / ia;
-
-            Set::Scalar alpha_conserved = q_arr(i, j, k, alpha_idx);
-            alpha = amrex::min(amrex::max(alpha_conserved, 0.0), 1.0);
+            ie_mix = amrex::max(ie_mix, ie_min);
+            Etot = rho * (ie_mix + ke);
 
             Set::Scalar p = mixture_model->closure_pressure(rho, ie_mix, alpha);
-            p = amrex::max(p, 1e-12);
+            p = amrex::max(p, p_floor);
 
-            // Write Primitives
-            p_arr(i, j, k, m1_idx)    = rho1;   // M1 slot = rho1
-            p_arr(i, j, k, m2_idx)    = rho2;   // M2 slot = rho2
-            p_arr(i, j, k, momx_idx)  = u;
-            #if AMREX_SPACEDIM >= 2
-            p_arr(i, j, k, momy_idx)  = v;
-            #endif
-            #if AMREX_SPACEDIM == 3
-            p_arr(i, j, k, momz_idx)  = w;
-            #endif
-            p_arr(i, j, k, etot_idx)  = ie_mix;
-            p_arr(i, j, k, alpha_idx) = alpha;
+            // Write corrected conservative state back
+            q_arr(i,j,k,m1_idx) = m1;
+            q_arr(i,j,k,m2_idx) = m2;
+            q_arr(i,j,k,momx_idx) = momx;
+#if AMREX_SPACEDIM >= 2
+            q_arr(i,j,k,momy_idx) = momy;
+#endif
+#if AMREX_SPACEDIM == 3
+            q_arr(i,j,k,momz_idx) = momz;
+#endif
+            q_arr(i,j,k,etot_idx) = Etot;
+            q_arr(i,j,k,alpha_idx) = alpha;
 
-            pressure_arr(i, j, k) = p;
+            // Primitive storage for your DI solver:
+            // PVec stores intrinsic rho1, rho2, velocity, ie_mix, alpha
+            const Set::Scalar a1 = amrex::max(alpha, a_floor);
+            const Set::Scalar a2 = amrex::max(Set::Scalar(1.0) - alpha, a_floor);
+
+            const Set::Scalar rho1 = m1 / a1;
+            const Set::Scalar rho2 = m2 / a2;
+
+            p_arr(i,j,k,m1_idx) = rho1;
+            p_arr(i,j,k,m2_idx) = rho2;
+            p_arr(i,j,k,momx_idx) = u;
+#if AMREX_SPACEDIM >= 2
+            p_arr(i,j,k,momy_idx) = v;
+#endif
+#if AMREX_SPACEDIM == 3
+            p_arr(i,j,k,momz_idx) = w;
+#endif
+            p_arr(i,j,k,etot_idx) = ie_mix;
+            p_arr(i,j,k,alpha_idx) = alpha;
+
+            pressure_arr(i,j,k) = p;
         });
     }
 }
-
-
 // Implementation of SetupNumericComponents
 void ScimitarX::SetupNumericComponents() 
 {
@@ -679,15 +698,19 @@ ScimitarX::Parse(ScimitarX& value, IO::ParmParse& pp)
             value.ic_PVec = new IC::Shock(value.geom, pp, "ic.shock.pvec", ScimitarX::variableIndex);
         } else if (type == "riemann2d") {
             value.ic_PVec = new IC::Riemann2D(value.geom, pp, "ic.riemann2d.pvec", ScimitarX::variableIndex);
+        } else if (type == "shockdroplet") {
+            value.ic_PVec = new IC::ShockDroplet(value.geom, pp, "ic.shockdroplet.pvec", ScimitarX::variableIndex);
         } else {
             Util::Abort(__FILE__, __func__, __LINE__, "Invalid ic.pvec.type: " + type);
         }
 
-        pp.query("ic.pressure.type", type); // IC condition type for pressure 
+        pp.query("ic.pressure.type", type);
         if (type == "shock") {
             value.ic_Pressure = new IC::Shock(value.geom, pp, "ic.shock.pressure");
         } else if (type == "riemann2d") {
             value.ic_Pressure = new IC::Riemann2D(value.geom, pp, "ic.riemann2d.pressure");
+        } else if (type == "shockdroplet") {
+            value.ic_Pressure = new IC::ShockDroplet(value.geom, pp, "ic.shockdroplet.pressure");
         } else {
             Util::Abort(__FILE__, __func__, __LINE__, "Invalid ic.pressure.type: " + type);
         }
@@ -744,6 +767,18 @@ ScimitarX::Parse(ScimitarX& value, IO::ParmParse& pp)
     }
       
     pp.query_required("cflNumber", value.cflNumber); // Read CFL number
+
+        // 5-equation positivity controls
+    pp.query_default("enable_di5_face_positivity",
+                     value.enable_di5_face_positivity, true);
+    pp.query_default("di5_partial_density_floor",
+                     value.di5_partial_density_floor, Set::Scalar(1.0e-12));
+    pp.query_default("di5_alpha_floor",
+                     value.di5_alpha_floor, Set::Scalar(1.0e-12));
+    pp.query_default("di5_pressure_floor",
+                     value.di5_pressure_floor, Set::Scalar(1.0e-12));
+    pp.query_default("di5_positivity_bisection_iters",
+                     value.di5_positivity_bisection_iters, 24);
 
     // Add these to your Parse method
     pp.query_default("enable_density_refinement", value.enable_density_refinement, true); // enable density refinement

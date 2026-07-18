@@ -408,6 +408,13 @@ protected:
 
     Set::Scalar refinement_threshold;         // Threshold for AMR refinement
 
+        // 5-equation positivity controls
+    bool enable_di5_face_positivity = true;
+    Set::Scalar di5_partial_density_floor = 1.0e-12;
+    Set::Scalar di5_alpha_floor = 1.0e-12;
+    Set::Scalar di5_pressure_floor = 1.0e-12;
+    int di5_positivity_bisection_iters = 24;
+
     // Refinement threshold values
     Set::Scalar density_refinement_criterion = 0.01;
     Set::Scalar velocity_refinement_criterion = 0.01;
