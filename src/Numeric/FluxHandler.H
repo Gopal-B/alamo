@@ -34,6 +34,8 @@ inline void ClampIndices(int indices[3], const int lower_bounds[3], const int up
     }
 }
 
+
+
 // ShiftAndClampIndices: Shifts and clamps indices (branch-free logic)
 AMREX_GPU_DEVICE
 inline void ShiftAndClampIndices(int indices[3], const int offsets[3],
@@ -67,6 +69,7 @@ public:
                                     const std::shared_ptr<GenericVariableAccessor>& variable_accessor,
                                     const amrex::MultiFab* AverageStateBuffer = nullptr) const = 0;
 };
+
 
 // Base class for flux methods (e.g., Local Lax-Friedrichs, HLLC)
 template <typename IntegratorDerivedClass>
@@ -160,16 +163,12 @@ private:
     std::shared_ptr<FluxReconstruction<IntegratorDerivedClass>> reconstruction;
     std::shared_ptr<FluxMethod<IntegratorDerivedClass>> flux_method;
     std::shared_ptr<GenericVariableAccessor> variable_accessor;
-    void ApplyPositivityLimiter_DI5(
-        int direction, int lev, IntegratorDerivedClass* solver,
-        const amrex::MultiFab& VariableBuffer,
-        amrex::MultiFab& LeftStates,
-        amrex::MultiFab& RightStates
-    ) const;
 
 
+    
+  
 
-
+    
     // For variable-based reconstruction methods like HLLC
     void ProcessVariableBasedReconstruction(
         int direction, int lev, IntegratorDerivedClass* solver) const;
@@ -178,123 +177,6 @@ private:
     void ProcessFluxBasedReconstruction(
         int direction, int lev, IntegratorDerivedClass* solver) const;
 };
-
-
-   
-    template <typename IntegratorDerivedClass>
-void FluxHandler<IntegratorDerivedClass>::ApplyPositivityLimiter_DI5(
-    int direction, int lev, IntegratorDerivedClass* solver,
-    const amrex::MultiFab& VariableBuffer,
-    amrex::MultiFab& LeftStates,
-    amrex::MultiFab& RightStates
-) const
-{
-    // Only for DI5
-    if (solver->fluid_mixture == nullptr) return;
-
-    const int nghosts = solver->number_of_ghost_cells;
-
-    const int m1_idx    = solver->variableIndex.M1;     // rho (primitive slot)
-    const int m2_idx    = solver->variableIndex.M2;     // p   (primitive slot)
-    const int etot_idx  = solver->variableIndex.ETOT;   // ie_mix (primitive slot)
-    const int alpha_idx = solver->variableIndex.ALPHA;  // alpha
-
-    constexpr Set::Scalar rho_floor   = 1.0e-12;
-    constexpr Set::Scalar p_floor     = 1.0e-12;
-    constexpr Set::Scalar ie_floor    = 1.0e-14;
-    constexpr Set::Scalar alpha_floor = 1.0e-12;
-
-    for (amrex::MFIter mfi(LeftStates, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-
-        // face index space
-        const amrex::Box& face_bx = mfi.grownnodaltilebox(direction, nghosts);
-
-        auto const& VB  = VariableBuffer.array(mfi);   // cell-centered primitive buffer
-        auto const& UL  = LeftStates.array(mfi);       // face-centered reconstructed
-        auto const& UR  = RightStates.array(mfi);
-
-        // bounds for clamping reads from VariableBuffer
-        const amrex::Box& cell_bx = VariableBuffer.box(mfi.index());
-        const int ilo = cell_bx.smallEnd(0), ihi = cell_bx.bigEnd(0);
-        const int jlo = cell_bx.smallEnd(1), jhi = cell_bx.bigEnd(1);
-#if AMREX_SPACEDIM == 3
-        const int klo = cell_bx.smallEnd(2), khi = cell_bx.bigEnd(2);
-#else
-        const int klo = 0, khi = 0;
-#endif
-
-        amrex::ParallelFor(face_bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
-
-            // Map face -> adjacent cells for 1st-order fallback
-            int iL = i, jL = j, kL = k;
-            int iR = i, jR = j, kR = k;
-
-            if (direction == FluxHandler<IntegratorDerivedClass>::Xdir) { iL = i-1; iR = i; }
-#if AMREX_SPACEDIM >= 2
-            if (direction == FluxHandler<IntegratorDerivedClass>::Ydir) { jL = j-1; jR = j; }
-#endif
-#if AMREX_SPACEDIM == 3
-            if (direction == FluxHandler<IntegratorDerivedClass>::Zdir) { kL = k-1; kR = k; }
-#endif
-
-            // Clamp cell indices into valid VariableBuffer box
-            iL = amrex::max(ilo, amrex::min(ihi, iL));
-            jL = amrex::max(jlo, amrex::min(jhi, jL));
-            kL = amrex::max(klo, amrex::min(khi, kL));
-
-            iR = amrex::max(ilo, amrex::min(ihi, iR));
-            jR = amrex::max(jlo, amrex::min(jhi, jR));
-            kR = amrex::max(klo, amrex::min(khi, kR));
-
-            auto fix_state = [&](auto const& Uface, int ic, int jc, int kc) AMREX_GPU_DEVICE {
-                // Replace face state by 1st-order (cell) state + clamp
-                Uface(i,j,k,m1_idx)   = amrex::max(rho_floor,  VB(ic,jc,kc,m1_idx));
-                Uface(i,j,k,m2_idx)   = amrex::max(p_floor,    VB(ic,jc,kc,m2_idx));
-                Uface(i,j,k,etot_idx) = amrex::max(ie_floor,   VB(ic,jc,kc,etot_idx));
-                Set::Scalar a = VB(ic,jc,kc,alpha_idx);
-                a = amrex::min(1.0 - alpha_floor, amrex::max(alpha_floor, a));
-                Uface(i,j,k,alpha_idx) = a;
-
-                // Copy velocities/transverse comps from VariableBuffer (primitive slots)
-                // This keeps architecture minimal: assume primitive buffer already stores them.
-                // If your layout is different, keep only the 4 clamps above.
-                // (No-op for other components is acceptable; the core fix is rho,p,ie,alpha.)
-            };
-
-            // --- Left face state check ---
-            {
-                Set::Scalar rho = UL(i,j,k,m1_idx);
-                Set::Scalar p   = UL(i,j,k,m2_idx);
-                Set::Scalar ie  = UL(i,j,k,etot_idx);
-                Set::Scalar a   = UL(i,j,k,alpha_idx);
-
-                // Clamp alpha always (even if otherwise valid)
-                a = amrex::min(1.0 - alpha_floor, amrex::max(alpha_floor, a));
-                UL(i,j,k,alpha_idx) = a;
-
-                const bool ok = (rho > rho_floor) && (p > p_floor) && (ie > ie_floor);
-                if (!ok) fix_state(UL, iL, jL, kL);
-            }
-
-            // --- Right face state check ---
-            {
-                Set::Scalar rho = UR(i,j,k,m1_idx);
-                Set::Scalar p   = UR(i,j,k,m2_idx);
-                Set::Scalar ie  = UR(i,j,k,etot_idx);
-                Set::Scalar a   = UR(i,j,k,alpha_idx);
-
-                a = amrex::min(1.0 - alpha_floor, amrex::max(alpha_floor, a));
-                UR(i,j,k,alpha_idx) = a;
-
-                const bool ok = (rho > rho_floor) && (p > p_floor) && (ie > ie_floor);
-                if (!ok) fix_state(UR, iR, jR, kR);
-            }
-        });
-    }
-
-    LeftStates.FillBoundary();
-    RightStates.FillBoundary();
-}
 
 // For variable-based reconstruction methods like HLLC
 template <typename IntegratorDerivedClass>
@@ -381,9 +263,7 @@ void FluxHandler<IntegratorDerivedClass>::ProcessVariableBasedReconstruction(
                             solver->number_of_components, ghost_cells);
 
    
-    // if (solver->fluid_mixture != nullptr) {
-    //     ApplyPositivityLimiter_DI5(direction, lev, solver, VariableBuffer, LeftStates, RightStates);
-    // }                        
+                        
     // 7. Compute fluxes from reconstructed states
     flux_method->ComputeFluxes(direction, lev, solver, 
                             LeftStates, RightStates, SummedFlux);
@@ -490,10 +370,7 @@ void FluxHandler<IntegratorDerivedClass>::ProcessFluxBasedReconstruction(
                                         SummedFlux);
 
 
-
-
 }
-
 // First-order upwind reconstruction
 template <typename IntegratorDerivedClass>
 class FirstOrderReconstruction : public FluxReconstruction<IntegratorDerivedClass> {
@@ -911,11 +788,7 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
             if (mixture_model != nullptr) {
                 
                 // --- 5-EQUATION HLLC FLUX ---
-                // This logic is translated from hllc_flux_DI5_basic
-                
-                // 1. Read Reconstructed Primitives (Left)
-                //    (from FiveEquationVariableAccessor::CopyVariables)
-                //    Indices are: [M1]=rho, [M2]=p, [MOMX]=u, [MOMY]=v, [MOMZ]=w, [ETOT]=ie_mix, [ALPHA]=alpha
+           
                 const Set::Scalar m1_L     = Left_arr(i, j, k, m1_idx);
                 const Set::Scalar m2_L       = Left_arr(i, j, k, m2_idx);
                 const Set::Scalar u_L       = Left_arr(i, j, k, momx_idx);
@@ -960,7 +833,7 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
                 
                 const Set::Scalar vel_R_normal = Right_arr(i, j, k, momx_idx + normal);
                 const Set::Scalar vel_R_trans1 = (AMREX_SPACEDIM >= 2) ? Right_arr(i, j, k, momx_idx + trans1) : 0.0;
-                // FIXED: Add preprocessor guard
+                
 #if AMREX_SPACEDIM == 3
                 const Set::Scalar vel_R_trans2 = Right_arr(i, j, k, momx_idx + trans2);
 #endif
@@ -1046,21 +919,21 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
                 const Set::Scalar S_star = (p_R - p_L + mom_L_normal_cons * (SL - vel_L_normal) - mom_R_normal_cons * (SR - vel_R_normal)) / (denom + 1e-16);
                 
 
-                // ---------- Face/interface velocity u_{i+1/2} (Eq. 35) ----------
+                // ---------- Face/interface velocity u_{i+1/2}
                 const Set::Scalar S_minus = amrex::min(Set::Scalar(0.0), SL);  // S^- = min(0, S^L)
                 const Set::Scalar S_plus  = amrex::max(Set::Scalar(0.0), SR);  // S^+ = max(0, S^R)
 
-                // sgn(S*) in {-1, +1} (treat 0 as +1 to match typical ">=0" branching)
+               
                 const Set::Scalar sgnSstar = (S_star >= 0.0) ? Set::Scalar(1.0) : Set::Scalar(-1.0);
 
                 const Set::Scalar HL = 0.5 * (1.0 + sgnSstar);  // (1 + sgn(S*))/2
                 const Set::Scalar HR = 0.5 * (1.0 - sgnSstar);  // (1 - sgn(S*))/2
 
-                // Terms inside Eq. (35)
+               
                 const Set::Scalar ratioL = (SL - vel_L_normal) / (SL - S_star + 1e-16);
                 const Set::Scalar ratioR = (SR - vel_R_normal) / (SR - S_star + 1e-16);
 
-                // Eq. (35):
+               
                 // u_face = HL * [ uL + S^- ( (SL-uL)/(SL-S*) - 1 ) ] + HR * [ uR + S^+ ( (SR-uR)/(SR-S*) - 1 ) ]
                 const Set::Scalar u_face =
                     HL * (vel_L_normal + S_minus * (ratioL - 1.0)) +
@@ -1085,7 +958,7 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
                         TotalFlux_arr(index[0], index[1], index[2], n) = FR[n];
                     }
                 } else {
-                    // In Star Region (paper form: build U*_L and U*_R directly using P_L / P_R, no p_star)
+                    
                 
                     std::vector<Set::Scalar> UstarL(num_components, 0.0);
                     std::vector<Set::Scalar> UstarR(num_components, 0.0);
@@ -1094,10 +967,7 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
                     const Set::Scalar inv_SL_Sstar = 1.0 / (SL - S_star + 1e-16);
                     const Set::Scalar inv_SR_Sstar = 1.0 / (SR - S_star + 1e-16);
                 
-                    // -------------------------
-                    // Left star state U*_L
-                    // factorL = (S_L - u_L) / (S_L - S*)
-                    // -------------------------
+                   
                     const Set::Scalar factorL = (SL - vel_L_normal) * inv_SL_Sstar;
                 
                     // m1*, m2*
@@ -1115,7 +985,7 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
                     UstarL[momx_idx + trans2] = QL_cons[momx_idx + trans2] * factorL;
                 #endif
                 
-                    // energy (paper Eq. (32) form):
+                
                     // E*_L = factorL * [ E_L + (S* - u_L) * ( rho_L * S* + P_L/(S_L - u_L) ) ]
                     const Set::Scalar inv_SL_minus_uL = 1.0 / (SL - vel_L_normal + 1e-16);
                     UstarL[etot_idx] =
@@ -1125,10 +995,7 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
                     // alpha* (per your python logic: do NOT scale; advect alpha itself)
                     UstarL[alpha_idx] = alpha_L * factorL;
                 
-                    // -------------------------
-                    // Right star state U*_R
-                    // factorR = (S_R - u_R) / (S_R - S*)
-                    // -------------------------
+                    
                     const Set::Scalar factorR = (SR - vel_R_normal) * inv_SR_Sstar;
                 
                     // m1*, m2*
@@ -1146,7 +1013,7 @@ void ComputeFluxes(int direction, int lev [[maybe_unused]], IntegratorDerivedCla
                     UstarR[momx_idx + trans2] = QR_cons[momx_idx + trans2] * factorR;
                 #endif
                 
-                    // energy (paper Eq. (32) form):
+                   
                     // E*_R = factorR * [ E_R + (S* - u_R) * ( rho_R * S* + P_R/(S_R - u_R) ) ]
                     const Set::Scalar inv_SR_minus_uR = 1.0 / (SR - vel_R_normal + 1e-16);
                     UstarR[etot_idx] =
