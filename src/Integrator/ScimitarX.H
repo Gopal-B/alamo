@@ -12,6 +12,7 @@
 #include <memory>
 
 #include "Integrator/Integrator.H"
+#include "IC/ShockDroplet.H"
 #include "IO/ParmParse.H"
 #include "BC/BC.H"
 #include "BC/Nothing.H"

@@ -5,6 +5,7 @@
 #include "BC/Constant.H"
 #include "IC/Shock.H"
 #include "IC/Riemann2D.H"
+#include "IC/ShockDroplet.H"
 #include "Model/Fluid/Fluid.H"
 #include "Numeric/Stencil.H"
 #include "Numeric/NumericTypes.H"
@@ -668,25 +669,29 @@ ScimitarX::Parse(ScimitarX& value, IO::ParmParse& pp)
     // Initial Conditions
     {
         std::string type = "constant";
-        pp.query("ic.pvec.type", type);  // IC condition type for Primitive Variables
-
+        pp.query("ic.pvec.type", type);
+    
         if (type == "shock") {
             value.ic_PVec = new IC::Shock(value.geom, pp, "ic.shock.pvec", ScimitarX::variableIndex);
         } else if (type == "riemann2d") {
             value.ic_PVec = new IC::Riemann2D(value.geom, pp, "ic.riemann2d.pvec", ScimitarX::variableIndex);
+        } else if (type == "shockdroplet") {
+            value.ic_PVec = new IC::ShockDroplet(value.geom, pp, "ic.shockdroplet.pvec", ScimitarX::variableIndex);
         } else {
             Util::Abort(__FILE__, __func__, __LINE__, "Invalid ic.pvec.type: " + type);
         }
-
-        pp.query("ic.pressure.type", type); // IC condition type for pressure 
+    
+        pp.query("ic.pressure.type", type);
         if (type == "shock") {
             value.ic_Pressure = new IC::Shock(value.geom, pp, "ic.shock.pressure");
         } else if (type == "riemann2d") {
             value.ic_Pressure = new IC::Riemann2D(value.geom, pp, "ic.riemann2d.pressure");
+        } else if (type == "shockdroplet") {
+            value.ic_Pressure = new IC::ShockDroplet(value.geom, pp, "ic.shockdroplet.pressure");
         } else {
             Util::Abort(__FILE__, __func__, __LINE__, "Invalid ic.pressure.type: " + type);
         }
-    } 
+    }
 
     std::string reconstr_str = "FirstOrder";  // Default
     pp.query("FluxReconstruction", reconstr_str);  // Read flux reconstruction method
@@ -1038,15 +1043,15 @@ void ScimitarX::ComputeAndSetNewTimeStep() {
     // Start with the finest level time step
     Set::Scalar coarsest_dt = finest_dt;
 
-    // Adjust the time step for the coarsest level by multiplying back the refinement ratios
+  
     for (int lev = finest_level; lev > 0; --lev) {
-        // `refRatio(lev - 1)` returns an IntVect. Assume isotropic refinement for simplicity.
+        
         int refinement_factor = refRatio(lev - 1)[0];  // Assuming refinement is isotropic (same value in all directions)
 
         coarsest_dt *= refinement_factor;  // Scale the time step conservatively for refinement
     }
 
-    // Set the coarsest-level time step for all levels
+    
     Integrator::SetTimestep(coarsest_dt);
 
 }
