@@ -60,6 +60,9 @@ public:
                         return std::make_shared<Numeric::WENOZ5<SolverType>>();
                     case WenoVariant::WENOJS3:
                         return std::make_shared<Numeric::WENOJS3<SolverType>>();
+
+                    case WenoVariant::WENOIS5:
+                        return std::make_shared<Numeric::WENOIS5<SolverType>>();
                     default:
                         throw std::runtime_error("Unsupported WENO variant");
                 }

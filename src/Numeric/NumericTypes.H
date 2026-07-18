@@ -37,7 +37,8 @@ namespace Numeric {
     enum class WenoVariant {
         WENOJS5,       // WENO Jiang-Shu 5th Order
         WENOZ5,        // WENO Z 5th Order
-        WENOJS3        // WENO JS 3rd Order
+        WENOJS3,        // WENO JS 3rd Order
+        WENOIS5
     };
 
     enum class FluxScheme {
