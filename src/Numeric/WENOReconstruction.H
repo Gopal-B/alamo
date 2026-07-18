@@ -239,6 +239,55 @@ struct WENOZ5Traits : public WENOJS5Traits {
     // Weight calculation is overridden in the WENOReconstructionPolicy
 };
 
+
+//==============================================================================
+// WENO-IS5 Traits - 5th order WENO with Incremental Stencils
+// Based on Wang et al. (2018) / paper equations (20)-(24)
+//==============================================================================
+
+struct WENOIS5Traits {
+    static constexpr int OrderValue = 5;
+    static constexpr Set::Scalar Epsilon = 1.0e-15;
+    static constexpr int NumCandidateStencils = 4;
+    static constexpr int PointsPerStencil = 3;   // max size among candidate stencils
+    static constexpr int TotalPoints = 5;        // full stencil: i-2 ... i+2
+    static constexpr int NumDifferenceTerms = 2; // only used if generic path is called
+    static constexpr int Power = 1;              // paper uses linear factor, not squared JS form
+
+    static Set::MultiVector GetOptimalWeights() {
+        Set::MultiVector weights(NumCandidateStencils);
+        weights << 15.0/32.0, 5.0/32.0, 5.0/16.0, 1.0/16.0;
+        return weights;
+    }
+
+    // These coefficients are for left-biased reconstruction at i+1/2.
+    // S0 and S1 are effectively 2-point stencils; the unused coefficient is zero-padded.
+    static Set::MultiMatrix GetCandidateStencilCoefficients() {
+        Set::MultiMatrix coeffs(NumCandidateStencils, PointsPerStencil);
+        coeffs <<
+             0.0,   1.0/2.0,   1.0/2.0,   // S0 with offsets {0,1,1}
+            -1.0/2.0, 3.0/2.0, 0.0,       // S1 with offsets {-1,0,0}
+             3.0/8.0, 6.0/8.0, -1.0/8.0,  // S2 with offsets {0,1,2}
+             3.0/8.0, -10.0/8.0, 15.0/8.0;// S3 with offsets {-2,-1,0}
+        return coeffs;
+    }
+
+    // Offsets are relative to center i of the left-biased stencil {i-2,i-1,i,i+1,i+2}
+    static Set::MultiMatrix GetSubStencilOffsets() {
+        Set::MultiMatrix offsets(NumCandidateStencils, PointsPerStencil);
+        offsets <<
+             0,  1,  1,   // S0 uses {i, i+1}; third entry duplicated but ignored by coeff=0
+            -1,  0,  0,   // S1 uses {i-1, i}; third entry duplicated but ignored by coeff=0
+             0,  1,  2,   // S2 uses {i, i+1, i+2}
+            -2, -1,  0;   // S3 uses {i-2, i-1, i}
+        return offsets;
+    }
+};
+
+
+
+
+
 //==============================================================================
 // Generic WENO Reconstruction Policy
 //==============================================================================
@@ -623,6 +672,172 @@ public:
 
 };
 
+template<>
+class WENOReconstructionPolicy<WENOIS5Traits> {
+public:
+    using Traits = WENOIS5Traits;
+
+    template <typename StencilArray>
+    AMREX_GPU_DEVICE
+    static auto ComputeCandidateFluxes(
+        const StencilArray& stencil,
+        int i, int j, int k,
+        bool enableDebug
+    ) {
+        std::array<Set::Scalar, Traits::NumCandidateStencils> S;
+
+        const Set::Scalar xim2 = stencil[0];
+        const Set::Scalar xim1 = stencil[1];
+        const Set::Scalar xi0  = stencil[2];
+        const Set::Scalar xip1 = stencil[3];
+        const Set::Scalar xip2 = stencil[4];
+
+        // Paper Eq. (21), left-biased state at i+1/2
+        S[0] = 0.5 * (xi0 + xip1);
+        S[1] = 0.5 * (-xim1 + 3.0 * xi0);
+        S[2] = 0.125 * (3.0 * xi0 + 6.0 * xip1 - xip2);
+        S[3] = 0.125 * (3.0 * xim2 - 10.0 * xim1 + 15.0 * xi0);
+
+        return S;
+    }
+
+    template <typename StencilArray>
+    AMREX_GPU_DEVICE
+    static auto ComputeSmoothnessIndicators(
+        const StencilArray& stencil,
+        int i, int j, int k,
+        bool enableDebug
+    ) {
+        std::array<Set::Scalar, Traits::NumCandidateStencils> beta;
+
+        const Set::Scalar xim2 = stencil[0];
+        const Set::Scalar xim1 = stencil[1];
+        const Set::Scalar xi0  = stencil[2];
+        const Set::Scalar xip1 = stencil[3];
+        const Set::Scalar xip2 = stencil[4];
+
+        // Paper Eq. (23)
+        beta[0] = (xi0 - xip1) * (xi0 - xip1);
+        beta[1] = (xim1 - xi0) * (xim1 - xi0);
+        beta[2] =
+            (13.0/12.0) * (xi0 - 2.0*xip1 + xip2) * (xi0 - 2.0*xip1 + xip2) +
+            (1.0/4.0)   * (3.0*xi0 - 4.0*xip1 + xip2) * (3.0*xi0 - 4.0*xip1 + xip2);
+        beta[3] =
+            (13.0/12.0) * (xim2 - 2.0*xim1 + xi0) * (xim2 - 2.0*xim1 + xi0) +
+            (1.0/4.0)   * (xim2 - 4.0*xim1 + 3.0*xi0) * (xim2 - 4.0*xim1 + 3.0*xi0);
+
+        return beta;
+    }
+
+    template <typename StencilArray>
+    AMREX_GPU_DEVICE
+    static Set::Scalar ComputeBeta01(const StencilArray& stencil) {
+        const Set::Scalar xim1 = stencil[1];
+        const Set::Scalar xi0  = stencil[2];
+        const Set::Scalar xip1 = stencil[3];
+
+        return
+            (13.0/12.0) * (xim1 - 2.0*xi0 + xip1) * (xim1 - 2.0*xi0 + xip1) +
+            (1.0/4.0)   * (xim1 - xip1) * (xim1 - xip1);
+    }
+
+    template <typename StencilArray>
+    AMREX_GPU_DEVICE
+    static Set::Scalar ComputeTau5(const StencilArray& stencil) {
+        const Set::Scalar xim2 = stencil[0];
+        const Set::Scalar xim1 = stencil[1];
+        const Set::Scalar xi0  = stencil[2];
+        const Set::Scalar xip1 = stencil[3];
+        const Set::Scalar xip2 = stencil[4];
+
+        // Paper Eq. (24)
+        return
+            (13.0/12.0) * (xip2 - 4.0*xip1 + 6.0*xi0 - 4.0*xim1 + xim2) *
+                          (xip2 - 4.0*xip1 + 6.0*xi0 - 4.0*xim1 + xim2)
+          + (1.0/4.0)   * (xip2 - 2.0*xip1 + 2.0*xim1 - xim2) *
+                          (xip2 - 2.0*xip1 + 2.0*xim1 - xim2);
+    }
+
+    template <typename StencilArray>
+    AMREX_GPU_DEVICE
+    static auto ComputeNonlinearWeights(
+        const StencilArray& stencil,
+        const std::array<Set::Scalar, Traits::NumCandidateStencils>& beta,
+        int i, int j, int k,
+        bool enableDebug
+    ) {
+        std::array<Set::Scalar, Traits::NumCandidateStencils> omega;
+        std::array<Set::Scalar, Traits::NumCandidateStencils> eta;
+
+        auto d = Traits::GetOptimalWeights();
+        const Set::Scalar tau5  = ComputeTau5(stencil);
+        const Set::Scalar beta01 = ComputeBeta01(stencil);
+        const Set::Scalar eps = Traits::Epsilon;
+
+        Set::Scalar eta_sum = 0.0;
+
+        for (int r = 0; r < Traits::NumCandidateStencils; ++r) {
+            if (r < 2) {
+                eta[r] = d(r) * (1.0 + (tau5 / (beta[r] + eps)) * (tau5 / (beta01 + eps)));
+            } else {
+                eta[r] = d(r) * (1.0 + tau5 / (beta[r] + eps));
+            }
+            eta_sum += eta[r];
+        }
+
+        const Set::Scalar inv_sum = (eta_sum > 1.0e-30) ? 1.0 / eta_sum : 1.0;
+        for (int r = 0; r < Traits::NumCandidateStencils; ++r) {
+            omega[r] = eta[r] * inv_sum;
+        }
+
+        return omega;
+    }
+
+    template <typename StencilMatrixType>
+    AMREX_GPU_DEVICE
+    static Set::MultiVector ReconstructValue(
+        const StencilMatrixType& input_stencil,
+        int i, int j, int k,
+        int direction [[maybe_unused]],
+        bool enableDebug
+    ) {
+        const int num_components = input_stencil.cols();
+        Set::MultiVector reconstructed_values(num_components);
+        reconstructed_values.setZero();
+
+        for (int comp = 0; comp < num_components; ++comp) {
+            std::array<Set::Scalar, Traits::TotalPoints> component_stencil;
+            for (int s = 0; s < Traits::TotalPoints; ++s) {
+                component_stencil[s] = input_stencil(s, comp);
+            }
+
+            auto beta   = ComputeSmoothnessIndicators(component_stencil, i, j, k, enableDebug);
+            auto S      = ComputeCandidateFluxes(component_stencil, i, j, k, enableDebug);
+            auto omega  = ComputeNonlinearWeights(component_stencil, beta, i, j, k, enableDebug);
+
+            Set::Scalar rec = 0.0;
+            for (int r = 0; r < Traits::NumCandidateStencils; ++r) {
+                rec += omega[r] * S[r];
+            }
+
+            reconstructed_values(comp) = rec;
+        }
+
+        return reconstructed_values;
+    }
+};
+
+
+
+
+
+
+
+
+
+
+
+
 //==============================================================================
 // WENO Reconstruction class (implements FluxReconstruction interface)
 //==============================================================================
@@ -650,11 +865,13 @@ public:
     std::string GetVariantName() const {
         if constexpr (std::is_same_v<VariantTraits, WENOJS3Traits>) {
             return "WENOJS3";
-        } else if constexpr (std::is_same_v<VariantTraits, WENOJS5Traits> && 
-                            !std::is_same_v<VariantTraits, WENOZ5Traits>) {
+        } else if constexpr (std::is_same_v<VariantTraits, WENOJS5Traits> &&
+                             !std::is_same_v<VariantTraits, WENOZ5Traits>) {
             return "WENOJS5";
         } else if constexpr (std::is_same_v<VariantTraits, WENOZ5Traits>) {
             return "WENOZ5";
+        } else if constexpr (std::is_same_v<VariantTraits, WENOIS5Traits>) {
+            return "WENOIS5";
         } else {
             return "Unknown";
         }
@@ -1004,6 +1221,9 @@ using WENOJS5 = WENOReconstruction<IntegratorDerivedClass, WENOJS5Traits>;
 */
 template<typename IntegratorDerivedClass>
 using WENOZ5 = WENOReconstruction<IntegratorDerivedClass, WENOZ5Traits>;
+
+template<typename IntegratorDerivedClass>
+using WENOIS5 = WENOReconstruction<IntegratorDerivedClass, WENOIS5Traits>;
 
 } // namespace Numeric
 

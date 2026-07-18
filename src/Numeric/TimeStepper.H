@@ -226,7 +226,7 @@ public:
                         Set::Scalar source_term = alpha * div_u;
                         
                         flux_div -= source_term;
-                    }
+                    }   
                     // --- END DI MODIFICATION ---
 
                     // **Runge-Kutta 3rd order update formula**

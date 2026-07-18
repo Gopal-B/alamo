@@ -45,10 +45,15 @@ FiveEquationCapabilities::supportsReconstructionMode(ReconstructionMode mode) co
 }
 
 SolverCapabilities::MethodSupport
-FiveEquationCapabilities::supportsWenoVariant(WenoVariant /*variant*/) const {
-    return SolverCapabilities::MethodSupport::Supported();
+FiveEquationCapabilities::supportsWenoVariant(WenoVariant variant) const {
+    if (variant == WenoVariant::WENOJS3 ||
+        variant == WenoVariant::WENOJS5 ||
+        variant == WenoVariant::WENOZ5  ||
+        variant == WenoVariant::WENOIS5) {
+        return SolverCapabilities::MethodSupport::Supported();
+    }
+    return SolverCapabilities::MethodSupport::Unsupported();
 }
-
 SolverCapabilities::MethodValidationResult
 FiveEquationCapabilities::validateMethodCombination(
     FluxReconstructionType /*fr*/,
@@ -77,7 +82,7 @@ FiveEquationCapabilities::getDefaultConfiguration() const {
         FluxScheme::HLLC,
         TimeSteppingSchemeType::RK3,
         ReconstructionMode::Characteristic,
-        WenoVariant::WENOJS5
+        WenoVariant::WENOIS5
     };
 }
 
