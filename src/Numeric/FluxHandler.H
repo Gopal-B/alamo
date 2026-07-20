@@ -96,8 +96,9 @@ bool DI5ThermoAdmissible(
     if (!DI5Finite(c2) || c2 <= eps_c2) return false;
 
 
-    // constexpr Set::Scalar eps_p = Set::Scalar(1.0e-14);
-    // if (p <= eps_p) return false;
+    constexpr Set::Scalar eps_p = Set::Scalar(1.0e-12);
+    if (p <= eps_p) return false;
+
     return true;
 }
 

@@ -1,0 +1,284 @@
+# ============================================================
+# DI5 AXISYMMETRIC NEAR-WALL EXPANSION-COLLAPSE
+# Tiwari-Freund-Pantano JCP 2013 strong near-wall jet case
+# LOCAL STABLE VERSION
+#
+# Physical case kept from Tiwari et al.:
+#   R0 = 0.25 mm
+#   wall distance d = 1.10 mm
+#   initial bubble pressure = 500 MPa
+#   ambient water pressure  = 10 MPa
+#   pressure ratio = 50
+
+# ============================================================
+
+
+# ============================================================
+# Simulation control
+# ============================================================
+
+plot_file = tiwari2013_strong_nearwall_LOCAL_STABLE_R128
+
+
+timestep  = 1.25e-10
+
+# Tiwari jet window is around 22--24 microseconds.
+stop_time = 6.6e-4
+
+max_step  = 250000
+
+
+# ============================================================
+# AMR / grid
+# ============================================================
+
+# Output every 0.1 microseconds:
+#   800 * 1.25e-10 = 1.0e-7 s
+amr.plot_int        = 100
+
+# Level 0 + Level 1 + Level 2
+amr.max_level       = 2
+
+# Domain:
+#   xlo = -1.10e-3 m
+#   xhi =  3.89e-2 m
+#   x length = 0.0400 m
+#
+#   ylo = 0
+#   yhi = 3.25e-2 m
+#   y length = 0.0325 m
+#
+# Base grid:
+#   dx0 = 0.0400 / 512 = 7.8125e-5 m
+#   dy0 = 0.0325 / 416 = 7.8125e-5 m
+#
+# Level 2:
+#   dx2 = dy2 = 1.953125e-5 m
+#
+# Bubble:
+#   R0 = 2.5e-4 m
+#   R0/dx2 = 12.8
+#   D0/dx2 = 25.6
+amr.n_cell          = 512 416 1
+
+amr.ref_ratio       = 2 2
+
+amr.blocking_factor = 8
+amr.max_grid_size   = 64
+amr.grid_eff        = 0.7
+
+# Static AMR only. No regridding.
+amr.regrid_int      = -1
+
+
+# ============================================================
+# Static AMR refinement
+#
+# Finest region includes:
+#   wall
+#   bubble
+#   expected expansion region
+#   collapse/jet path
+# ============================================================
+
+amr.static_refinement.enabled = true
+
+amr.static_refinement.center_x = 0.0
+amr.static_refinement.center_y = 0.0
+
+# Level 0 -> Level 1
+amr.static_refinement.radius_lev0 = 8.0e-3
+
+# Level 1 -> Level 2
+amr.static_refinement.radius_lev1 = 3.0e-3
+
+# Not used because max_level = 2
+amr.static_refinement.radius_lev2 = -1.0
+
+
+# ============================================================
+# Geometry
+# ============================================================
+
+# Tiwari strong near-wall case:
+#   R0 = 0.25 mm
+#   d  = 1.10 mm
+#
+# Mirrored setup:
+#   paper schematic wall is on right
+#   this input places wall on left at xlo = -1.10 mm
+#
+# Therefore:
+#   wall-directed jet => u_x < 0
+geometry.prob_lo     = -1.10e-3  0.0      0.0
+geometry.prob_hi     =  3.89e-2  3.25e-2  0.1
+geometry.is_periodic = 0 0 0
+
+geometry.mode                          = axisymmetric_xz
+geometry.axial_dir                     = 0
+geometry.radial_dir                    = 1
+geometry.axis_origin                   = 0.0
+geometry.axisymmetric_r_epsilon_factor = 0.5
+geometry.axisymmetric_apply_axis_bc    = true
+
+
+# ============================================================
+# Solver configuration
+# ============================================================
+
+SolverType = SolveFiveEquationModel
+
+FluxReconstruction = WENO
+FluxScheme         = HLLC
+TimeSteppingScheme = RK3
+
+ReconstructionMode = Primitive
+WenoVariant        = WENOIS5
+
+# Conservative for strong expansion-collapse.
+cflNumber = 0.15
+
+
+# ============================================================
+# DI5 robustness controls
+# ============================================================
+
+enable_di5_face_positivity     = true
+di5_partial_density_floor      = 1.0e-12
+di5_alpha_floor                = 1.0e-10
+di5_pressure_floor             = 1.0
+
+# Slightly more bisection iterations; numerical only.
+di5_positivity_bisection_iters = 32
+
+# Explicit xlo slip-wall parity.
+di5.apply_xlo_slip_wall = true
+
+# Set true only for a tiny first debug run.
+di5.debug_boundary_parity = false
+
+
+# ============================================================
+# Material EOS
+#
+# Tiwari et al.:
+#   air:
+#       gamma = 1.4
+#       pi = 0
+#
+#   water stiffened gas:
+#       gamma = 4.4
+#       pi = 600 MPa
+# ============================================================
+
+ic.shock.pvec.gamma1 = 1.4
+ic.shock.pvec.gamma2 = 4.4
+
+ic.shock.pvec.pi1    = 0.0
+ic.shock.pvec.pi2    = 6.0e8
+
+
+# ============================================================
+# Initial condition
+# ============================================================
+
+ic.pvec.type     = shockdroplet
+ic.pressure.type = shockdroplet
+
+# false:
+#   phase 1 = gas bubble
+#   phase 2 = surrounding water
+ic.shockdroplet.phase1_is_liquid = false
+
+# Bubble geometry
+ic.shockdroplet.geometry.bubble_center_x = 0.0
+ic.shockdroplet.geometry.bubble_center_y = 0.0
+ic.shockdroplet.geometry.bubble_radius   = 2.5e-4
+
+# dx_min = 1.953125e-5 m.
+# Use 3 finest cells for stability.
+ic.shockdroplet.geometry.interface_thickness = 5.859375e-5
+
+
+# ============================================================
+# Bubble gas state
+#
+# Tiwari strong jet case:
+#   p_bubble = 500 MPa
+#
+# ============================================================
+
+ic.shockdroplet.ambient.rho_g = 85.0
+ic.shockdroplet.ambient.p     = 5.0e8
+ic.shockdroplet.ambient.u     = 0.0
+ic.shockdroplet.ambient.v     = 0.0
+
+
+# ============================================================
+# Surrounding water state
+#
+# Tiwari strong jet case:
+#   p_inf = 10 MPa
+# ============================================================
+
+ic.shockdroplet.liquid.rho = 1000.0
+ic.shockdroplet.liquid.p   = 1.0e7
+ic.shockdroplet.liquid.u   = 0.0
+ic.shockdroplet.liquid.v   = 0.0
+
+
+# ============================================================
+# Boundary conditions
+#
+# xlo = rigid slip wall:
+#   rho1, rho2, u_r, ie_mix, alpha even
+#   u_x odd
+#
+# ylo = axis:
+#   input says neumann, then ApplyAxisymmetricBoundaryConditions()
+#   overwrites ylo ghosts with correct axis parity.
+#
+# xhi/yhi:
+#   Tiwari et al. used characteristic non-reflecting far-field BCs.
+#   Current solver uses Neumann; domain is kept large to reduce
+#   early contamination.
+# ============================================================
+
+bc.pvec.type.xlo = REFLECT_EVEN REFLECT_EVEN REFLECT_ODD REFLECT_EVEN REFLECT_EVEN REFLECT_EVEN
+bc.pvec.type.xhi = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.ylo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.yhi = neumann neumann neumann neumann neumann neumann
+
+bc.pvec.val.xlo = 0 0 0 0 0 0
+bc.pvec.val.xhi = 0 0 0 0 0 0
+bc.pvec.val.ylo = 0 0 0 0 0 0
+bc.pvec.val.yhi = 0 0 0 0 0 0
+
+bc.pressure.type.xlo = neumann
+bc.pressure.type.xhi = neumann
+bc.pressure.type.ylo = neumann
+bc.pressure.type.yhi = neumann
+
+bc.pressure.val.xlo = 0
+bc.pressure.val.xhi = 0
+bc.pressure.val.ylo = 0
+bc.pressure.val.yhi = 0
+
+
+# ============================================================
+# Gradient refinement flags
+#
+# Off for fixed static-AMR local run.
+# ============================================================
+
+enable_density_refinement = false
+density_refinement_criterion = 0.2
+
+enable_pressure_refinement = false
+pressure_refinement_criterion = 0.15
+
+enable_velocity_refinement = false
+velocity_refinement_criterion = 0.1
+
+enable_vorticity_refinement = false
+vorticity_refinement_criterion = 0.25
