@@ -1,0 +1,124 @@
+# Axisymmetric PR20 free-bubble-collapse validation with Kapila K source
+# 48-core moderate AMR case for Keller-Miksis comparison
+
+plot_file = kapila_moderate
+
+timestep  = 1.0e-9
+stop_time = 6.0e-5
+max_step  = 60000
+
+amr.abort_on_nan    = 1
+amr.check_input     = 1
+amr.plot_int        = 50
+amr.max_level       = 5
+amr.ref_ratio       = 2 2 2 2 2
+amr.n_cell          = 512 256 1
+amr.blocking_factor = 8
+amr.regrid_int      = -1
+amr.grid_eff        = 0.7
+amr.max_grid_size   = 64
+amr.n_error_buf     = 2
+amr.n_proper        = 1
+amr.refine_grid_layout = 1
+
+amr.static_refinement.enabled     = true
+amr.static_refinement.center_x    = 0.0
+amr.static_refinement.center_y    = 0.0
+amr.static_refinement.radius_lev0 = 8.0e-3
+amr.static_refinement.radius_lev1 = 5.0e-3
+amr.static_refinement.radius_lev2 = 3.0e-3
+
+geometry.prob_lo     = -6.4e-2 0.0 0.0
+geometry.prob_hi     =  6.4e-2 6.4e-2 0.1
+geometry.is_periodic = 0 0 0
+
+geometry.mode                          = axisymmetric_xz
+geometry.axial_dir                     = 0
+geometry.radial_dir                    = 1
+geometry.axis_origin                   = 0.0
+geometry.axisymmetric_apply_axis_bc    = true
+geometry.axisymmetric_r_epsilon_factor = 0.5
+
+SolverType = SolveFiveEquationModel
+
+cflNumber = 0.20
+
+TimeSteppingScheme = RK3
+FluxScheme         = HLLC
+FluxReconstruction = WENO
+WenoVariant        = WENOIS5
+ReconstructionMode = Primitive
+
+enable_di5_face_positivity     = true
+di5_partial_density_floor      = 1.0e-12
+di5_alpha_floor                = 1.0e-10
+di5_pressure_floor             = 1.0
+di5_positivity_bisection_iters = 24
+
+enable_kapila_k_source = true
+kapila_k_alpha_floor   = 1.0e-10
+kapila_k_denom_floor   = 1.0e-20
+kapila_k_limit         = true
+
+ic.pvec.type     = shockdroplet
+ic.pressure.type = shockdroplet
+
+ic.shock.pvec.gamma1 = 1.4
+ic.shock.pvec.gamma2 = 4.4
+ic.shock.pvec.pi1    = 0.0
+ic.shock.pvec.pi2    = 6.0e8
+
+ic.shockdroplet.phase1_is_liquid = false
+
+ic.shockdroplet.geometry.bubble_center_x     = 0.0
+ic.shockdroplet.geometry.bubble_center_y     = 0.0
+ic.shockdroplet.geometry.bubble_radius       = 1.0e-3
+ic.shockdroplet.geometry.interface_thickness = 6.25e-5
+
+ic.shockdroplet.ambient.rho_g = 1.2
+ic.shockdroplet.ambient.p     = 1.01325e5
+ic.shockdroplet.ambient.u     = 0.0
+ic.shockdroplet.ambient.v     = 0.0
+
+ic.shockdroplet.liquid.rho = 1000.0
+ic.shockdroplet.liquid.p   = 2.0265e6
+ic.shockdroplet.liquid.u   = 0.0
+ic.shockdroplet.liquid.v   = 0.0
+
+bc.pvec.type.xhi = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.xlo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.yhi = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.ylo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.zhi = dirichlet
+bc.pvec.type.zlo = dirichlet
+
+bc.pvec.val.xhi = 0 0 0 0 0 0
+bc.pvec.val.xlo = 0 0 0 0 0 0
+bc.pvec.val.yhi = 0 0 0 0 0 0
+bc.pvec.val.ylo = 0 0 0 0 0 0
+bc.pvec.val.zhi = 0.0
+bc.pvec.val.zlo = 0.0
+
+bc.pressure.type.xhi = neumann
+bc.pressure.type.xlo = neumann
+bc.pressure.type.yhi = neumann
+bc.pressure.type.ylo = neumann
+bc.pressure.type.zhi = dirichlet
+bc.pressure.type.zlo = dirichlet
+
+bc.pressure.val.xhi = 0
+bc.pressure.val.xlo = 0
+bc.pressure.val.yhi = 0
+bc.pressure.val.ylo = 0
+bc.pressure.val.zhi = 0.0
+bc.pressure.val.zlo = 0.0
+
+enable_density_refinement   = true
+enable_pressure_refinement  = false
+enable_velocity_refinement  = true
+enable_vorticity_refinement = false
+
+density_refinement_criterion   = 1.0e-2
+pressure_refinement_criterion  = 1.0e9
+velocity_refinement_criterion  = 5.0e-2
+vorticity_refinement_criterion = 1.0e9
