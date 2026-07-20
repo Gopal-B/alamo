@@ -1,7 +1,7 @@
 # ==========================================
 # Simulation Control
 # ==========================================
-plot_file = AWcharactersticWENOIS2000
+plot_file = AWtest
 
 timestep  = 1.0e-7
 stop_time = .229e-03
@@ -31,7 +31,7 @@ cflNumber           = 0.7
 TimeSteppingScheme  = RK3
 FluxScheme          = HLLC
 FluxReconstruction  = WENO
-WenoVariant         = WENOIS5
+WenoVariant         = WENOZ5
 ReconstructionMode  = Characteristic
 
 # ==========================================
