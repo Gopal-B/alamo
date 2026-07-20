@@ -1,0 +1,160 @@
+# ==========================================
+# 2D Mach 2.4 Shock - Water Cylinder Interaction
+# Sembian et al. setup (geometry / mesh / ICs from paper)
+
+# ==========================================
+
+plot_file = ShockWaterinderM24_Sembian768Primitive
+
+# Practical run controls
+# (not explicitly given in the uploaded paper pages)
+timestep  = 2.0e-7
+stop_time = 2.0e-4
+max_step  = 500000
+
+# ==========================================
+# AMR / Grid Parameters
+# Exact paper mesh: 3072 x 2048
+# Exact paper domain: 11.1 cm x 7.4 cm
+# ==========================================
+amr.plot_int        = 10
+amr.max_level       = 0
+amr.n_cell          = 768 512 1
+amr.blocking_factor = 1
+amr.regrid_int      = -1
+amr.grid_eff        = 1.0
+
+# Domain in meters
+# Figure 11 gives total width = 11.1 cm and total height = 7.4 cm
+# Cylinder center is at [4 cm, 0 cm], so y is centered about 0
+geometry.prob_lo     = 0.0    -3.7e-2   0.0
+geometry.prob_hi     = 1.11e-1  3.7e-2  0.1
+geometry.is_periodic = 0 0 0
+
+# ==========================================
+# Solver Configuration
+# ==========================================
+SolverType          = SolveFiveEquationModel
+cflNumber           = 0.7
+
+TimeSteppingScheme  = RK3
+FluxScheme          = HLLC
+FluxReconstruction  = WENO
+WenoVariant         = WENOIS5
+ReconstructionMode  = Characteristic
+
+# ==========================================
+# Physics Constants
+# Phase-1 = water, Phase-2 = air
+# ==========================================
+ic.shock.pvec.gamma1 = 6.68
+ic.shock.pvec.gamma2 = 1.4
+ic.shock.pvec.pi1    = 3.05e8
+ic.shock.pvec.pi2    = 0.0
+
+# ==========================================
+# Initial Conditions: shockdroplet
+# ==========================================
+ic.pvec.type        = shockdroplet
+ic.pressure.type    = shockdroplet
+
+# ------------------------------------------
+# Driver region = post-shock air
+# Exact state is from Table 8.
+
+# ------------------------------------------
+ic.shockdroplet.geometry.x_driver_lo = 0.0
+ic.shockdroplet.geometry.x_driver_hi = 1.5e-2
+ic.shockdroplet.geometry.y_driver_lo = -3.7e-2
+ic.shockdroplet.geometry.y_driver_hi =  3.7e-2
+
+# ------------------------------------------
+# Water cylinder
+# Exact from Figure 11:
+# center = [4 cm, 0 cm]
+# diameter = 2.2 cm => radius = 1.1 cm
+# ------------------------------------------
+ic.shockdroplet.geometry.droplet_center_x = 0.03
+ic.shockdroplet.geometry.droplet_center_y = 0.0
+ic.shockdroplet.geometry.droplet_radius   = 1.1e-2
+
+# sharp interface
+ic.shockdroplet.geometry.interface_thickness = 0
+
+# Phase convention
+ic.shockdroplet.phase1_is_liquid = 1
+
+# ------------------------------------------
+# Ambient gas = pre-shock air
+# Exact from Table 8
+# alpha1*rho1 = 1e-8, alpha2*rho2 = 1.17, alpha1 = 1e-8
+# -> practical pure-air state for this IC format
+# ------------------------------------------
+ic.shockdroplet.ambient.rho = 1.17
+ic.shockdroplet.ambient.p   = 1.01e5
+ic.shockdroplet.ambient.u   = 0.0
+ic.shockdroplet.ambient.v   = 0.0
+
+# ------------------------------------------
+# Driver gas = post-shock air
+# Exact from Table 8
+# ------------------------------------------
+ic.shockdroplet.driver.rho = 3.7579
+ic.shockdroplet.driver.p   = 6.6189e5
+ic.shockdroplet.driver.u   = 574.57
+ic.shockdroplet.driver.v   = 0.0
+
+# ------------------------------------------
+# Liquid cylinder = water
+# Exact from Table 8
+# ------------------------------------------
+ic.shockdroplet.liquid.rho = 1000.0
+ic.shockdroplet.liquid.p   = 1.01e5
+ic.shockdroplet.liquid.u   = 0.0
+ic.shockdroplet.liquid.v   = 0.0
+
+# ==========================================
+# Boundary Conditions
+# Paper says: constant extrapolation at all boundaries
+# In your input style, that corresponds to neumann
+# ==========================================
+
+# 6 components: [M1, M2, MOMX, MOMY, ETOT, ALPHA]
+bc.pvec.type.xlo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.xhi = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.ylo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.yhi = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.zlo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.zhi = neumann neumann neumann neumann neumann neumann
+
+bc.pvec.val.xlo  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.xhi  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.ylo  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.yhi  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.zlo  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.zhi  = 0.0 0.0 0.0 0.0 0.0 0.0
+
+bc.pressure.type.xlo = neumann
+bc.pressure.type.xhi = neumann
+bc.pressure.type.ylo = neumann
+bc.pressure.type.yhi = neumann
+bc.pressure.type.zlo = neumann
+bc.pressure.type.zhi = neumann
+
+bc.pressure.val.xlo = 0.0
+bc.pressure.val.xhi = 0.0
+bc.pressure.val.ylo = 0.0
+bc.pressure.val.yhi = 0.0
+bc.pressure.val.zlo = 0.0
+bc.pressure.val.zhi = 0.0
+
+# ----------------------------------------------------------
+# DI positivity controls
+# ----------------------------------------------------------
+enable_di5_face_positivity     = 1
+di5_partial_density_floor      = 1.0e-12
+di5_alpha_floor                = 1.0e-12
+di5_pressure_floor             = 1.0e-8
+di5_positivity_bisection_iters = 24
+
+
