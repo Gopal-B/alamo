@@ -1,8 +1,7 @@
 # ==========================================
 # Simulation Control
 # ==========================================
-plot_file = AWater
-
+plot_file = THINC
 timestep  = 1.0e-7
 stop_time = .229e-03
 max_step  = 100000
@@ -10,7 +9,7 @@ max_step  = 100000
 # ==========================================
 # AMR / Grid Parameters (2D)
 # ==========================================
-amr.plot_int        = 200
+amr.plot_int        = 300
 amr.max_level       = 0
 amr.n_cell          = 1500 4 1
 amr.blocking_factor = 1
@@ -104,7 +103,6 @@ bc.pressure.val.yhi = 0.0
 bc.pressure.val.zlo = 0.0
 bc.pressure.val.zhi = 0.0
 
-
 # ----------------------------------------------------------
 # DI positivity controls
 # ----------------------------------------------------------
@@ -113,3 +111,24 @@ di5_partial_density_floor      = 1.0e-12
 di5_alpha_floor                = 1.0e-12
 di5_pressure_floor             = 1.0e-8
 di5_positivity_bisection_iters = 24
+
+# ------------------------------------------
+# DI5 THINC interface sharpening
+# ------------------------------------------
+
+
+enable_di5_thinc = true
+di5_thinc_beta = 0.75
+
+
+di5_thinc_alpha_eps = 1.0e-3
+
+
+di5_thinc_clip_eps = 1.0e-12
+
+di5_thinc_alpha_jump_min = 5.0e-2
+di5_thinc_max_pressure_jump = 5.0e-2
+di5_thinc_require_monotone = true
+
+# Keep this on while testing THINC
+enable_di5_face_positivity = true

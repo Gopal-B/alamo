@@ -79,8 +79,11 @@ bool DI5ThermoAdmissible(
     if (mixture_model == nullptr) return false;
     if (!DI5Finite(m1) || !DI5Finite(m2) || !DI5Finite(p) || !DI5Finite(alpha)) return false;
 
-    if (m1 <= eps_m || m2 <= eps_m) return false;
-    if (alpha <= eps_a || alpha >= Set::Scalar(1.0) - eps_a) return false;
+    constexpr Set::Scalar eps_p = Set::Scalar(1.0e-14);
+
+    if (m1 < eps_m || m2 < eps_m) return false;
+    if (alpha < eps_a || alpha > Set::Scalar(1.0) - eps_a) return false;
+    if (p < eps_p) return false;
 
     const Set::Scalar rho = m1 + m2;
     if (!DI5Finite(rho) || rho <= eps_m) return false;
@@ -249,7 +252,195 @@ void DI5ApplyThetaLimit(
     p  = DI5Blend(theta, p,  p_lo);
     a  = DI5Blend(theta, a,  a_lo);
 }
+// ========================= DI5 THINC helpers =========================
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5ClampAlphaTHINC(Set::Scalar a, Set::Scalar eps)
+{
+    return amrex::max(eps, amrex::min(Set::Scalar(1.0) - eps, a));
+}
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5Abs(Set::Scalar x)
+{
+    return (x >= Set::Scalar(0.0)) ? x : -x;
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5Max3(Set::Scalar a, Set::Scalar b, Set::Scalar c)
+{
+    return amrex::max(a, amrex::max(b, c));
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5Min3(Set::Scalar a, Set::Scalar b, Set::Scalar c)
+{
+    return amrex::min(a, amrex::min(b, c));
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+bool DI5THINCIsInterfaceCell(
+    Set::Scalar a_m,
+    Set::Scalar a_c,
+    Set::Scalar a_p,
+    Set::Scalar eps,
+    Set::Scalar alpha_jump_min,
+    bool require_monotone)
+{
+    if (!DI5Finite(a_m) || !DI5Finite(a_c) || !DI5Finite(a_p)) {
+        return false;
+    }
+
+    // Reject pure cells and almost-pure alpha tails.
+    if (a_c <= eps || a_c >= Set::Scalar(1.0) - eps) {
+        return false;
+    }
+
+    const Set::Scalar amax = DI5Max3(a_m, a_c, a_p);
+    const Set::Scalar amin = DI5Min3(a_m, a_c, a_p);
+
+    // Important:
+    // Do not sharpen tiny WENO/positivity-created alpha tails.
+    if ((amax - amin) < alpha_jump_min) {
+        return false;
+    }
+
+    if (require_monotone) {
+        const Set::Scalar dl = a_c - a_m;
+        const Set::Scalar dr = a_p - a_c;
+
+        // Shyue-Xiao interface-cell monotonicity condition:
+        // (alpha_i - alpha_{i-1})(alpha_{i+1} - alpha_i) > 0
+        if (dl * dr <= Set::Scalar(0.0)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+bool DI5THINCPressureSensorOK(
+    Set::Scalar p_m,
+    Set::Scalar p_c,
+    Set::Scalar p_p,
+    Set::Scalar p_floor,
+    Set::Scalar max_rel_jump)
+{
+    // Negative value disables pressure/shock sensor.
+    if (max_rel_jump < Set::Scalar(0.0)) {
+        return true;
+    }
+
+    if (!DI5Finite(p_m) || !DI5Finite(p_c) || !DI5Finite(p_p)) {
+        return false;
+    }
+
+    const Set::Scalar pmax_abs =
+        DI5Max3(DI5Abs(p_m), DI5Abs(p_c), DI5Abs(p_p));
+
+    const Set::Scalar pmax = DI5Max3(p_m, p_c, p_p);
+    const Set::Scalar pmin = DI5Min3(p_m, p_c, p_p);
+
+    const Set::Scalar rel_jump = (pmax - pmin) / (pmax_abs + p_floor);
+
+    // If pressure jumps strongly on the same stencil,
+    // let WENO/HLLC handle it; do not THINC-sharpen there.
+    return rel_jump <= max_rel_jump;
+}
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5THINCInterfaceLocationPositive(
+    Set::Scalar a_c,
+    Set::Scalar beta,
+    Set::Scalar eps)
+{
+    constexpr Set::Scalar tiny = Set::Scalar(1.0e-30);
+
+    const Set::Scalar b = amrex::max(beta, Set::Scalar(1.0e-12));
+    a_c = DI5ClampAlphaTHINC(a_c, eps);
+
+    // Positive-gradient canonical THINC profile:
+    // Phi(xi) = 0.5 * [1 + tanh(beta * (xi - x0))]
+    //
+    // The cell-average conservation gives x0.
+    // Negative gradients are handled by mirror flipping in DI5THINCEdgeAlpha().
+    const Set::Scalar eb  = std::exp(b);
+    const Set::Scalar emb = std::exp(-b);
+
+    const Set::Scalar R =
+        std::exp(Set::Scalar(2.0) * b * (a_c - Set::Scalar(0.5)));
+
+    Set::Scalar numerator   = R - emb;
+    Set::Scalar denominator = eb - R;
+
+    numerator   = amrex::max(numerator, tiny);
+    denominator = amrex::max(denominator, tiny);
+
+    const Set::Scalar t = amrex::max(numerator / denominator, tiny);
+
+    return -Set::Scalar(0.5) * std::log(t) / b;
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5THINCPositiveProfile(
+    Set::Scalar a_c,
+    Set::Scalar beta,
+    Set::Scalar eps,
+    Set::Scalar xi)
+{
+    const Set::Scalar x0 =
+        DI5THINCInterfaceLocationPositive(a_c, beta, eps);
+
+    const Set::Scalar af =
+        Set::Scalar(0.5) *
+        (Set::Scalar(1.0) + std::tanh(beta * (xi - x0)));
+
+    return DI5ClampAlphaTHINC(af, eps);
+}
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+Set::Scalar DI5THINCEdgeAlpha(
+    Set::Scalar a_m,
+    Set::Scalar a_c,
+    Set::Scalar a_p,
+    Set::Scalar beta,
+    Set::Scalar eps,
+    bool right_edge)
+{
+    a_c = DI5ClampAlphaTHINC(a_c, eps);
+
+    const Set::Scalar xi =
+        right_edge ? Set::Scalar(1.0) : Set::Scalar(0.0);
+
+    const bool increasing =
+        ((a_p - a_m) >= Set::Scalar(0.0));
+
+    if (increasing) {
+        return DI5THINCPositiveProfile(a_c, beta, eps, xi);
+    }
+
+    // Decreasing alpha:
+    // alpha decreases left-to-right, so the complement (1-alpha)
+    // increases left-to-right over the SAME local coordinate xi.
+    //
+    // Correct relation:
+    //   alpha(xi) = 1 - THINC_positive(1-alpha_c, xi)
+    //
+    // Do NOT use (1-xi) here. That swaps the left and right edge values
+    // and causes a small interface-position shift.
+    const Set::Scalar a_comp =
+        DI5ClampAlphaTHINC(Set::Scalar(1.0) - a_c, eps);
+
+    const Set::Scalar comp_face =
+        DI5THINCPositiveProfile(
+            a_comp,
+            beta,
+            eps,
+            xi
+        );
+
+    return DI5ClampAlphaTHINC(Set::Scalar(1.0) - comp_face, eps);
+}
+
+// ======================= end DI5 THINC helpers =======================
 // ======================= end DI5 positivity helpers =======================
 
 // Base class for flux reconstruction
@@ -463,10 +654,175 @@ void FluxHandler<IntegratorDerivedClass>::ProcessVariableBasedReconstruction(
             variable_accessor,
             (mode == ReconstructionMode::Characteristic) ? &AverageStateBuffer : nullptr);
 
+
+
+
+// 5a. DI5 THINC interface sharpening:
+// Apply after WENO/WENO-IS reconstruction and before positivity limiting.
+//
+// IMPORTANT CURRENT CHOICE:
+// For robustness, THINC only modifies ALPHA.
+// It does NOT modify m1, m2, velocity, or pressure.
+// Reason: the no-THINC density profile is already correct, and the observed
+// density dip is introduced when THINC overwrites m1/m2.
+if (solver->fluid_mixture != nullptr && solver->enable_di5_thinc) {
+    const int p_idx     = solver->variableIndex.ETOT;   // pressure slot in reconstruction buffer
+    const int alpha_idx = solver->variableIndex.ALPHA;
+
+    const Set::Scalar beta_thinc = solver->di5_thinc_beta;
+
+    // eps_select: decides whether a cell is an interface cell.
+    // eps_clip: only used for safe THINC clipping and division protection.
+    const Set::Scalar eps_select = solver->di5_thinc_alpha_eps;
+    const Set::Scalar eps_clip   = solver->di5_thinc_clip_eps;
+
+    const Set::Scalar p_floor = solver->di5_pressure_floor;
+    const bool require_monotone = solver->di5_thinc_require_monotone;
+
+    const Set::Scalar alpha_jump_min = solver->di5_thinc_alpha_jump_min;
+    const Set::Scalar max_p_jump     = solver->di5_thinc_max_pressure_jump;
+
+    for (amrex::MFIter mfi(LeftStates, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const amrex::Box& face_bx = mfi.grownnodaltilebox(direction, ghost_cells);
+        const amrex::Box& cell_bx = VariableBuffer[mfi].box();
+
+        auto const& Var_arr         = VariableBuffer.array(mfi);
+        auto const& LeftStates_arr  = LeftStates.array(mfi);
+        auto const& RightStates_arr = RightStates.array(mfi);
+
+        const int ilo = cell_bx.smallEnd(0);
+        const int ihi = cell_bx.bigEnd(0);
+        const int jlo = cell_bx.smallEnd(1);
+        const int jhi = cell_bx.bigEnd(1);
+#if AMREX_SPACEDIM == 3
+        const int klo = cell_bx.smallEnd(2);
+        const int khi = cell_bx.bigEnd(2);
+#else
+        const int klo = 0;
+        const int khi = 0;
+#endif
+
+        amrex::ParallelFor(face_bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            int lower_bounds[3] = {ilo, jlo, klo};
+            int upper_bounds[3] = {ihi, jhi, khi};
+
+            // Convention used by your reconstruction:
+            // face index i represents the interface between cell i and cell i+1.
+            int Lc[3] = {i, j, k};
+            int Rc[3] = {i, j, k};
+
+            ClampIndices(Lc, lower_bounds, upper_bounds);
+
+            int plus[3] = {0, 0, 0};
+            plus[direction] = 1;
+            ShiftAndClampIndices(Rc, plus, lower_bounds, upper_bounds, direction);
+
+            // ---------- Left state: right edge of left donor cell ----------
+            {
+                int Lm[3] = {Lc[0], Lc[1], Lc[2]};
+                int Lp[3] = {Lc[0], Lc[1], Lc[2]};
+
+                int minus[3] = {0, 0, 0};
+                minus[direction] = -1;
+
+                int plus1[3] = {0, 0, 0};
+                plus1[direction] = 1;
+
+                ShiftAndClampIndices(Lm, minus, lower_bounds, upper_bounds, direction);
+                ShiftAndClampIndices(Lp, plus1, lower_bounds, upper_bounds, direction);
+
+                const Set::Scalar a_m = Var_arr(Lm[0], Lm[1], Lm[2], alpha_idx);
+                const Set::Scalar a_c = Var_arr(Lc[0], Lc[1], Lc[2], alpha_idx);
+                const Set::Scalar a_p = Var_arr(Lp[0], Lp[1], Lp[2], alpha_idx);
+
+                const Set::Scalar p_m = Var_arr(Lm[0], Lm[1], Lm[2], p_idx);
+                const Set::Scalar p_c = Var_arr(Lc[0], Lc[1], Lc[2], p_idx);
+                const Set::Scalar p_p = Var_arr(Lp[0], Lp[1], Lp[2], p_idx);
+
+                const bool is_thinc_cell =
+                    DI5THINCIsInterfaceCell(
+                        a_m, a_c, a_p,
+                        eps_select,
+                        alpha_jump_min,
+                        require_monotone
+                    )
+                    &&
+                    DI5THINCPressureSensorOK(
+                        p_m, p_c, p_p,
+                        p_floor,
+                        max_p_jump
+                    );
+
+                if (is_thinc_cell) {
+                    const Set::Scalar a_face = DI5THINCEdgeAlpha(
+                        a_m, a_c, a_p,
+                        beta_thinc,
+                        eps_clip,
+                        true    // right edge of left donor cell
+                    );
+
+                    // Alpha-only THINC:
+                    // Keep WENO/WENOIS m1, m2, velocity, and pressure unchanged.
+                    LeftStates_arr(i,j,k,alpha_idx) = a_face;
+                }
+            }
+
+            // ---------- Right state: left edge of right donor cell ----------
+            {
+                int Rm[3] = {Rc[0], Rc[1], Rc[2]};
+                int Rp[3] = {Rc[0], Rc[1], Rc[2]};
+
+                int minus[3] = {0, 0, 0};
+                minus[direction] = -1;
+
+                int plus1[3] = {0, 0, 0};
+                plus1[direction] = 1;
+
+                ShiftAndClampIndices(Rm, minus, lower_bounds, upper_bounds, direction);
+                ShiftAndClampIndices(Rp, plus1, lower_bounds, upper_bounds, direction);
+
+                const Set::Scalar a_m = Var_arr(Rm[0], Rm[1], Rm[2], alpha_idx);
+                const Set::Scalar a_c = Var_arr(Rc[0], Rc[1], Rc[2], alpha_idx);
+                const Set::Scalar a_p = Var_arr(Rp[0], Rp[1], Rp[2], alpha_idx);
+
+                const Set::Scalar p_m = Var_arr(Rm[0], Rm[1], Rm[2], p_idx);
+                const Set::Scalar p_c = Var_arr(Rc[0], Rc[1], Rc[2], p_idx);
+                const Set::Scalar p_p = Var_arr(Rp[0], Rp[1], Rp[2], p_idx);
+
+                const bool is_thinc_cell =
+                    DI5THINCIsInterfaceCell(
+                        a_m, a_c, a_p,
+                        eps_select,
+                        alpha_jump_min,
+                        require_monotone
+                    )
+                    &&
+                    DI5THINCPressureSensorOK(
+                        p_m, p_c, p_p,
+                        p_floor,
+                        max_p_jump
+                    );
+
+                if (is_thinc_cell) {
+                    const Set::Scalar a_face = DI5THINCEdgeAlpha(
+                        a_m, a_c, a_p,
+                        beta_thinc,
+                        eps_clip,
+                        false   // left edge of right donor cell
+                    );
+
+                    // Alpha-only THINC:
+                    // Keep WENO/WENOIS m1, m2, velocity, and pressure unchanged.
+                    RightStates_arr(i,j,k,alpha_idx) = a_face;
+                }
+            }
+        });
+    }
+}
         // 5b. DI5 positivity limiter:
     // apply ONLY when reconstructed face state violates the admissible set.
     // Otherwise leave the high-order reconstructed state untouched.
-    if (solver->fluid_mixture != nullptr) {
+    if (solver->fluid_mixture != nullptr && solver->enable_di5_face_positivity) {
         const auto* mixture_model = solver->fluid_mixture.get();
 
         const int m1_idx    = solver->variableIndex.M1;

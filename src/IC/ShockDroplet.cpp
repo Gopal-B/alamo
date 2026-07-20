@@ -55,34 +55,29 @@ void ShockDroplet::initialize(IO::ParmParse& pp, const std::string& name)
         }
     }
 
-    // Domain defaults
-    const Set::Scalar domain_xlo = geom[0].ProbLo()[0];
-    const Set::Scalar domain_xhi = geom[0].ProbHi()[0];
+    // Domain defaults, useful for optional y/z driver extents.
+    Set::Scalar domain_xlo = geom[0].ProbLo()[0];
+    Set::Scalar domain_xhi = geom[0].ProbHi()[0];
 #if AMREX_SPACEDIM >= 2
-    const Set::Scalar domain_ylo = geom[0].ProbLo()[1];
-    const Set::Scalar domain_yhi = geom[0].ProbHi()[1];
+    Set::Scalar domain_ylo = geom[0].ProbLo()[1];
+    Set::Scalar domain_yhi = geom[0].ProbHi()[1];
 #endif
 #if AMREX_SPACEDIM == 3
-    const Set::Scalar domain_zlo = geom[0].ProbLo()[2];
-    const Set::Scalar domain_zhi = geom[0].ProbHi()[2];
+    Set::Scalar domain_zlo = geom[0].ProbLo()[2];
+    Set::Scalar domain_zhi = geom[0].ProbHi()[2];
 #endif
 
-    // -------------------------------------------------
+    // -----------------------------
     // Geometry parsing
-    // -------------------------------------------------
-    // Driver region is OPTIONAL now.
-    // If not provided, it remains disabled by keeping hi <= lo.
+    // -----------------------------
+    // Driver region: support both x_driver_lo/x_driver_hi and x_hp_min/x_hp_max names.
     x_driver_lo = domain_xlo;
-    x_driver_hi = domain_xlo - Set::Scalar(1.0);
-
-    bool has_x_driver_lo = pp.query("ic.shockdroplet.geometry.x_driver_lo", x_driver_lo);
-    bool has_x_driver_hi = pp.query("ic.shockdroplet.geometry.x_driver_hi", x_driver_hi);
-
-    if (!has_x_driver_lo) {
-        pp.query("ic.shockdroplet.geometry.x_hp_min", x_driver_lo);
+    x_driver_hi = domain_xlo;
+    if (!pp.query("ic.shockdroplet.geometry.x_driver_lo", x_driver_lo)) {
+        pp.query_required("ic.shockdroplet.geometry.x_hp_min", x_driver_lo);
     }
-    if (!has_x_driver_hi) {
-        pp.query("ic.shockdroplet.geometry.x_hp_max", x_driver_hi);
+    if (!pp.query("ic.shockdroplet.geometry.x_driver_hi", x_driver_hi)) {
+        pp.query_required("ic.shockdroplet.geometry.x_hp_max", x_driver_hi);
     }
 
 #if AMREX_SPACEDIM >= 2
@@ -101,59 +96,50 @@ void ShockDroplet::initialize(IO::ParmParse& pp, const std::string& name)
     pp.query("ic.shockdroplet.geometry.z_driver_hi", z_driver_hi);
 #endif
 
-    // Support both droplet_* and bubble_* aliases
-    droplet_center_x = Set::Scalar(0.5) * (domain_xlo + domain_xhi);
-    if (!pp.query("ic.shockdroplet.geometry.droplet_center_x", droplet_center_x)) {
-        pp.query("ic.shockdroplet.geometry.bubble_center_x", droplet_center_x);
-    }
+    droplet_center_x = 0.5 * (domain_xlo + domain_xhi);
+    pp.query_required("ic.shockdroplet.geometry.droplet_center_x", droplet_center_x);
 #if AMREX_SPACEDIM >= 2
-    droplet_center_y = Set::Scalar(0.5) * (domain_ylo + domain_yhi);
-    if (!pp.query("ic.shockdroplet.geometry.droplet_center_y", droplet_center_y)) {
-        pp.query("ic.shockdroplet.geometry.bubble_center_y", droplet_center_y);
-    }
+    droplet_center_y = 0.5 * (domain_ylo + domain_yhi);
+    pp.query_required("ic.shockdroplet.geometry.droplet_center_y", droplet_center_y);
 #endif
 #if AMREX_SPACEDIM == 3
-    droplet_center_z = Set::Scalar(0.5) * (domain_zlo + domain_zhi);
-    if (!pp.query("ic.shockdroplet.geometry.droplet_center_z", droplet_center_z)) {
-        pp.query("ic.shockdroplet.geometry.bubble_center_z", droplet_center_z);
-    }
+    droplet_center_z = 0.5 * (domain_zlo + domain_zhi);
+    pp.query_required("ic.shockdroplet.geometry.droplet_center_z", droplet_center_z);
 #endif
 
     droplet_radius = -1.0;
     if (!pp.query("ic.shockdroplet.geometry.droplet_radius", droplet_radius)) {
-        if (!pp.query("ic.shockdroplet.geometry.bubble_radius", droplet_radius)) {
-            pp.query_required("ic.shockdroplet.geometry.radius", droplet_radius);
-        }
+        pp.query_required("ic.shockdroplet.geometry.radius", droplet_radius);
     }
 
     interface_thickness = 0.0;
     pp.query("ic.shockdroplet.geometry.interface_thickness", interface_thickness);
     if (interface_thickness < 0.0) interface_thickness = -interface_thickness;
 
-    // phase1_is_liquid = true  -> liquid droplet in gas   (original use)
-    // phase1_is_liquid = false -> gas bubble in liquid    (new bubble-collapse use)
     phase1_is_liquid = true;
     pp.query("ic.shockdroplet.phase1_is_liquid", phase1_is_liquid);
 
+    if (x_driver_hi <= x_driver_lo) {
+        Util::Abort(INFO, "ShockDroplet: x_driver_hi must be greater than x_driver_lo.");
+    }
 #if AMREX_SPACEDIM >= 2
-    const bool driver_enabled = (x_driver_hi > x_driver_lo) && (y_driver_hi > y_driver_lo);
-#else
-    const bool driver_enabled = (x_driver_hi > x_driver_lo);
+    if (y_driver_hi <= y_driver_lo) {
+        Util::Abort(INFO, "ShockDroplet: y_driver_hi must be greater than y_driver_lo.");
+    }
 #endif
 #if AMREX_SPACEDIM == 3
-    const bool driver_enabled_3d = driver_enabled && (z_driver_hi > z_driver_lo);
-#else
-    const bool driver_enabled_3d = driver_enabled;
+    if (z_driver_hi <= z_driver_lo) {
+        Util::Abort(INFO, "ShockDroplet: z_driver_hi must be greater than z_driver_lo.");
+    }
 #endif
-
     if (droplet_radius <= 0.0) {
         Util::Abort(INFO, "ShockDroplet: droplet_radius must be positive.");
     }
 
-    // -------------------------------------------------
+    // -----------------------------
     // State parsing
-    // -------------------------------------------------
-    // Ambient gas / bubble gas
+    // -----------------------------
+    // Ambient gas
     ambient_rho_g = 1.0;
     if (!pp.query("ic.shockdroplet.ambient.rho_g", ambient_rho_g)) {
         pp.query_required("ic.shockdroplet.ambient.rho", ambient_rho_g);
@@ -167,28 +153,21 @@ void ShockDroplet::initialize(IO::ParmParse& pp, const std::string& name)
     pp.query_default("ic.shockdroplet.ambient.w", ambient_w, Set::Scalar(0.0));
 #endif
 
-    // Driver region state
-    // Legacy names are kept. In bubble mode, these are interpreted as the
-    // surrounding-medium state inside the driver region.
-    driver_rho_g = ambient_rho_g;
-    pp.query("ic.shockdroplet.driver.rho_g", driver_rho_g);
-    pp.query("ic.shockdroplet.driver.rho", driver_rho_g);
-
-    driver_p = ambient_p;
-    pp.query("ic.shockdroplet.driver.p", driver_p);
-
-    driver_u = ambient_u;
-    pp.query("ic.shockdroplet.driver.u", driver_u);
+    // Driver gas
+    driver_rho_g = 1.0;
+    if (!pp.query("ic.shockdroplet.driver.rho_g", driver_rho_g)) {
+        pp.query_required("ic.shockdroplet.driver.rho", driver_rho_g);
+    }
+    pp.query_required("ic.shockdroplet.driver.p", driver_p);
+    pp.query_default("ic.shockdroplet.driver.u", driver_u, Set::Scalar(0.0));
 #if AMREX_SPACEDIM >= 2
-    driver_v = ambient_v;
-    pp.query("ic.shockdroplet.driver.v", driver_v);
+    pp.query_default("ic.shockdroplet.driver.v", driver_v, Set::Scalar(0.0));
 #endif
 #if AMREX_SPACEDIM == 3
-    driver_w = ambient_w;
-    pp.query("ic.shockdroplet.driver.w", driver_w);
+    pp.query_default("ic.shockdroplet.driver.w", driver_w, Set::Scalar(0.0));
 #endif
 
-    // Liquid / surrounding liquid
+    // Liquid
     liquid_rho_l = 1000.0;
     if (!pp.query("ic.shockdroplet.liquid.rho_l", liquid_rho_l)) {
         pp.query_required("ic.shockdroplet.liquid.rho", liquid_rho_l);
@@ -203,28 +182,16 @@ void ShockDroplet::initialize(IO::ParmParse& pp, const std::string& name)
 #endif
 
     Util::Message(INFO, "ShockDroplet geometry parsed:");
-    if (driver_enabled_3d) {
-        Util::Message(INFO, "  driver region enabled");
-        Util::Message(INFO, "  driver x-range = [" + std::to_string(x_driver_lo) + ", " + std::to_string(x_driver_hi) + "]");
+    Util::Message(INFO, "  driver x-range = [" + std::to_string(x_driver_lo) + ", " + std::to_string(x_driver_hi) + "]");
 #if AMREX_SPACEDIM >= 2
-        Util::Message(INFO, "  driver y-range = [" + std::to_string(y_driver_lo) + ", " + std::to_string(y_driver_hi) + "]");
+    Util::Message(INFO, "  driver y-range = [" + std::to_string(y_driver_lo) + ", " + std::to_string(y_driver_hi) + "]");
 #endif
 #if AMREX_SPACEDIM == 3
-        Util::Message(INFO, "  driver z-range = [" + std::to_string(z_driver_lo) + ", " + std::to_string(z_driver_hi) + "]");
+    Util::Message(INFO, "  driver z-range = [" + std::to_string(z_driver_lo) + ", " + std::to_string(z_driver_hi) + "]");
 #endif
-    } else {
-        Util::Message(INFO, "  driver region disabled");
-    }
-
-    Util::Message(INFO, "  object radius = " + std::to_string(droplet_radius));
+    Util::Message(INFO, "  droplet radius = " + std::to_string(droplet_radius));
     Util::Message(INFO, "  interface thickness = " + std::to_string(interface_thickness));
     Util::Message(INFO, std::string("  phase1_is_liquid = ") + (phase1_is_liquid ? "true" : "false"));
-
-    if (phase1_is_liquid) {
-        Util::Message(INFO, "  mode = liquid droplet in gas");
-    } else {
-        Util::Message(INFO, "  mode = gas bubble in liquid");
-    }
 }
 
 void ShockDroplet::AddConstant(const int& lev, Set::Field<Set::Scalar>& a_phi, Set::Scalar)
@@ -241,9 +208,10 @@ void ShockDroplet::AddConstant(const int& lev, Set::Field<Set::Scalar>& a_phi, S
 #if AMREX_SPACEDIM == 3
     const int momz_idx = (requires_variable_indices && variable_indices) ? variable_indices->MOMZ : -1;
 #endif
-    const int etot_idx  = (requires_variable_indices && variable_indices) ? variable_indices->ETOT  : -1;
-    const int alpha_idx = (requires_variable_indices && variable_indices) ? variable_indices->ALPHA : -1;
+    const int etot_idx = (requires_variable_indices && variable_indices) ? variable_indices->ETOT : -1;
+    const int alpha_idx= (requires_variable_indices && variable_indices) ? variable_indices->ALPHA: -1;
 
+    // Copy member data to local POD values for GPU lambdas.
     const bool is_pressure_mf = (mf_name == "ic.shockdroplet.pressure");
 
     const Set::Scalar xdrv_lo = x_driver_lo;
@@ -264,8 +232,7 @@ void ShockDroplet::AddConstant(const int& lev, Set::Field<Set::Scalar>& a_phi, S
 #if AMREX_SPACEDIM == 3
     const Set::Scalar zc = droplet_center_z;
 #endif
-
-    const Set::Scalar R   = droplet_radius;
+    const Set::Scalar R  = droplet_radius;
     const Set::Scalar eps = interface_thickness;
     const bool phase1_liq = phase1_is_liquid;
 
@@ -279,35 +246,24 @@ void ShockDroplet::AddConstant(const int& lev, Set::Field<Set::Scalar>& a_phi, S
     const Set::Scalar w_amb     = ambient_w;
 #endif
 
-    const Set::Scalar rho_drv = driver_rho_g;
-    const Set::Scalar p_drv   = driver_p;
-    const Set::Scalar u_drv   = driver_u;
+    const Set::Scalar rho_g_drv = driver_rho_g;
+    const Set::Scalar p_drv     = driver_p;
+    const Set::Scalar u_drv     = driver_u;
 #if AMREX_SPACEDIM >= 2
-    const Set::Scalar v_drv   = driver_v;
+    const Set::Scalar v_drv     = driver_v;
 #endif
 #if AMREX_SPACEDIM == 3
-    const Set::Scalar w_drv   = driver_w;
+    const Set::Scalar w_drv     = driver_w;
 #endif
 
-    const Set::Scalar rho_l = liquid_rho_l;
-    const Set::Scalar p_l   = liquid_p;
-    const Set::Scalar u_l   = liquid_u;
+    const Set::Scalar rho_l     = liquid_rho_l;
+    const Set::Scalar p_l       = liquid_p;
+    const Set::Scalar u_l       = liquid_u;
 #if AMREX_SPACEDIM >= 2
-    const Set::Scalar v_l   = liquid_v;
+    const Set::Scalar v_l       = liquid_v;
 #endif
 #if AMREX_SPACEDIM == 3
-    const Set::Scalar w_l   = liquid_w;
-#endif
-
-#if AMREX_SPACEDIM >= 2
-    const bool driver_enabled = (xdrv_hi > xdrv_lo) && (ydrv_hi > ydrv_lo);
-#else
-    const bool driver_enabled = (xdrv_hi > xdrv_lo);
-#endif
-#if AMREX_SPACEDIM == 3
-    const bool driver_enabled_3d = driver_enabled && (zdrv_hi > zdrv_lo);
-#else
-    const bool driver_enabled_3d = driver_enabled;
+    const Set::Scalar w_l       = liquid_w;
 #endif
 
     for (amrex::MFIter mfi(*a_phi[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
@@ -331,7 +287,7 @@ void ShockDroplet::AddConstant(const int& lev, Set::Field<Set::Scalar>& a_phi, S
                 const Set::Scalar zpos = 0.0;
 #endif
 
-                bool in_driver = driver_enabled_3d && (xpos >= xdrv_lo && xpos <= xdrv_hi);
+                bool in_driver = (xpos >= xdrv_lo && xpos <= xdrv_hi);
 #if AMREX_SPACEDIM >= 2
                 in_driver = in_driver && (ypos >= ydrv_lo && ypos <= ydrv_hi);
 #endif
@@ -353,102 +309,61 @@ void ShockDroplet::AddConstant(const int& lev, Set::Field<Set::Scalar>& a_phi, S
 
                 const Set::Scalar r = std::sqrt(dx*dx + dy*dy + dz*dz);
 
-                // Geometric indicator of the spherical/circular object:
-                // chi_inside = 1 inside the object, 0 outside.
-                Set::Scalar chi_inside = 0.0;
+                Set::Scalar alpha_liq = 0.0;
                 if (eps > 0.0) {
-                    chi_inside = 0.5 * (Set::Scalar(1.0) - std::tanh((r - R) / eps));
-                    chi_inside = amrex::min(amrex::max(chi_inside, Set::Scalar(0.0)), Set::Scalar(1.0));
+                    alpha_liq = 0.5 * (Set::Scalar(1.0) - std::tanh((r - R) / eps));
+                    alpha_liq = amrex::min(amrex::max(alpha_liq, Set::Scalar(0.0)), Set::Scalar(1.0));
                 } else {
-                    chi_inside = (r <= R) ? Set::Scalar(1.0) : Set::Scalar(0.0);
+                    alpha_liq = (r <= R) ? Set::Scalar(1.0) : Set::Scalar(0.0);
                 }
 
-                const bool object_dominant = (chi_inside >= Set::Scalar(0.5));
-                const bool use_driver_region = in_driver && !object_dominant;
+                // Droplet gets priority over driver gas if there is any overlap.
+                const bool liquid_dominant = (alpha_liq >= Set::Scalar(0.5));
+                const bool use_driver_gas = in_driver && !liquid_dominant;
 
-                Set::Scalar rho1 = 0.0;
-                Set::Scalar rho2 = 0.0;
-                Set::Scalar alpha_store = chi_inside;
-
-                Set::Scalar u0 = 0.0;
-                Set::Scalar p0 = 0.0;
+                const Set::Scalar rho_g = use_driver_gas ? rho_g_drv : rho_g_amb;
+                const Set::Scalar p_g   = use_driver_gas ? p_drv     : p_amb;
+                const Set::Scalar u_g   = use_driver_gas ? u_drv     : u_amb;
 #if AMREX_SPACEDIM >= 2
-                Set::Scalar v0 = 0.0;
+                const Set::Scalar v_g   = use_driver_gas ? v_drv     : v_amb;
 #endif
 #if AMREX_SPACEDIM == 3
-                Set::Scalar w0 = 0.0;
+                const Set::Scalar w_g   = use_driver_gas ? w_drv     : w_amb;
 #endif
 
-                if (phase1_liq) {
-                    // -----------------------------------------
-                    // Original mode: liquid droplet in gas
-                    // phase1 = liquid, phase2 = gas
-                    // -----------------------------------------
-                    const Set::Scalar rho_g_out = use_driver_region ? rho_drv : rho_g_amb;
-                    const Set::Scalar p_out     = use_driver_region ? p_drv   : p_amb;
-                    const Set::Scalar u_out     = use_driver_region ? u_drv   : u_amb;
+                // Shared velocity field for the 5-equation model.
+                // If interface_thickness == 0, this reduces to region-wise constants.
+                const Set::Scalar u0 = alpha_liq * u_l + (Set::Scalar(1.0) - alpha_liq) * u_g;
 #if AMREX_SPACEDIM >= 2
-                    const Set::Scalar v_out     = use_driver_region ? v_drv   : v_amb;
+                const Set::Scalar v0 = alpha_liq * v_l + (Set::Scalar(1.0) - alpha_liq) * v_g;
 #endif
 #if AMREX_SPACEDIM == 3
-                    const Set::Scalar w_out     = use_driver_region ? w_drv   : w_amb;
+                const Set::Scalar w0 = alpha_liq * w_l + (Set::Scalar(1.0) - alpha_liq) * w_g;
 #endif
 
-                    rho1 = rho_l;
-                    rho2 = rho_g_out;
-
-                    u0 = chi_inside * u_l + (Set::Scalar(1.0) - chi_inside) * u_out;
-#if AMREX_SPACEDIM >= 2
-                    v0 = chi_inside * v_l + (Set::Scalar(1.0) - chi_inside) * v_out;
-#endif
-#if AMREX_SPACEDIM == 3
-                    w0 = chi_inside * w_l + (Set::Scalar(1.0) - chi_inside) * w_out;
-#endif
-
-                    if (eps > 0.0) {
-                        p0 = chi_inside * p_l + (Set::Scalar(1.0) - chi_inside) * p_out;
-                    } else {
-                        p0 = (r <= R) ? p_l : p_out;
-                    }
-                } else {
-                    // -----------------------------------------
-                    // New mode: gas bubble in liquid
-                    // phase1 = gas bubble, phase2 = surrounding liquid
-                    //
-                    // driver.* is interpreted here as the surrounding-medium
-                    // state inside the driver region.
-                    // -----------------------------------------
-                    const Set::Scalar rho_out = use_driver_region ? rho_drv : rho_l;
-                    const Set::Scalar p_out   = use_driver_region ? p_drv   : p_l;
-                    const Set::Scalar u_out   = use_driver_region ? u_drv   : u_l;
-#if AMREX_SPACEDIM >= 2
-                    const Set::Scalar v_out   = use_driver_region ? v_drv   : v_l;
-#endif
-#if AMREX_SPACEDIM == 3
-                    const Set::Scalar w_out   = use_driver_region ? w_drv   : w_l;
-#endif
-
-                    rho1 = rho_g_amb;   // phase1 = bubble gas
-                    rho2 = rho_out;     // phase2 = surrounding medium
-
-                    u0 = chi_inside * u_amb + (Set::Scalar(1.0) - chi_inside) * u_out;
-#if AMREX_SPACEDIM >= 2
-                    v0 = chi_inside * v_amb + (Set::Scalar(1.0) - chi_inside) * v_out;
-#endif
-#if AMREX_SPACEDIM == 3
-                    w0 = chi_inside * w_amb + (Set::Scalar(1.0) - chi_inside) * w_out;
-#endif
-
-                    if (eps > 0.0) {
-                        p0 = chi_inside * p_amb + (Set::Scalar(1.0) - chi_inside) * p_out;
-                    } else {
-                        p0 = (r <= R) ? p_amb : p_out;
-                    }
-                }
+                // Pressure field. For smoothed interfaces, blend linearly.
+                const Set::Scalar p0 = (eps > 0.0)
+                    ? (alpha_liq * p_l + (Set::Scalar(1.0) - alpha_liq) * p_g)
+                    : ((r <= R) ? p_l : p_g);
 
                 if (is_pressure_mf) {
                     phi(i, j, k, n) = p0;
                     return;
+                }
+
+                // pvec path: only FiveEquation is supported here.
+                Set::Scalar rho1 = 0.0;
+                Set::Scalar rho2 = 0.0;
+                Set::Scalar alpha_store = 0.0;
+
+                if (phase1_liq) {
+                    rho1 = rho_l;
+                    rho2 = rho_g;
+                    alpha_store = alpha_liq;
+                } else {
+                    rho1 = rho_g;
+                    rho2 = rho_l;
+                    alpha_store = Set::Scalar(1.0) - alpha_liq;
                 }
 
                 if (n == m1_idx) {
@@ -466,8 +381,8 @@ void ShockDroplet::AddConstant(const int& lev, Set::Field<Set::Scalar>& a_phi, S
                     phi(i, j, k, n) = w0;
 #endif
                 } else if (n == etot_idx) {
-                    // Placeholder.
-                    // ScimitarX::Initialize() later computes consistent ie_mix from p + alpha.
+                    // Placeholder. ScimitarX::Initialize() later recomputes
+                    // consistent mixture internal energy from pressure + alpha.
                     phi(i, j, k, n) = Set::Scalar(0.0);
                 } else if (n == alpha_idx) {
                     phi(i, j, k, n) = alpha_store;
