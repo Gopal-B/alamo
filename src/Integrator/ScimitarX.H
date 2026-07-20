@@ -389,12 +389,6 @@ protected:
     // x = axial, y = radial. Only active for 2D DI5 axisymmetric runs.
     void ApplyAxisymmetricBoundaryConditions(int lev);
     
-        // Explicit DI5 slip-wall parity at xlo.
-    // This makes the rigid-wall treatment independent of parser ambiguity.
-    void ApplyDI5XloSlipWallBoundaryConditions(int lev);
-
-    // Optional debug check for wall/axis parity.
-    void DebugCheckDI5BoundaryParity(int lev, const char* tag);
 
     // [DI MODIFICATION] Templates for solver specialization
     template <SolverType solverType> void ComputeConservedVariables(int lev);
@@ -451,21 +445,22 @@ Set::Scalar static_refine_radius_lev2 = -1.0; // level 2 tags -> create level 3
     Set::Scalar refinement_threshold;         // Threshold for AMR refinement
 
         // 5-equation positivity controls
-    // 5-equation positivity controls
     bool enable_di5_face_positivity = true;
     Set::Scalar di5_partial_density_floor = 1.0e-12;
     Set::Scalar di5_alpha_floor = 1.0e-12;
     Set::Scalar di5_pressure_floor = 1.0e-12;
     int di5_positivity_bisection_iters = 24;
 
-    // Explicit DI5 xlo slip-wall fill.
-    // Keep false for generic cases; set true for near-wall bubble-collapse cases.
-    bool di5_apply_xlo_slip_wall = false;
-
-    // Print a small parity diagnostic after ghost filling.
-    bool di5_debug_boundary_parity = false;
-
     bool axisymmetric_enabled = false;
+        // Kapila volume-fraction source:
+    // ∂α/∂t + u·∇α = K ∇·u
+    bool enable_kapila_k_source = false;
+
+    Set::Scalar kapila_k_alpha_floor = 1.0e-10;
+    Set::Scalar kapila_k_denom_floor = 1.0e-20;
+
+    // Limit K to keep (alpha + K) bounded in Cartesian form.
+    bool kapila_k_limit = true;
 
     // Keep this true for x-r bubble-collapse runs.
     // It overrides the ylo ghost cells with correct even/odd parity.
