@@ -65,6 +65,12 @@ public:
         SolveFiveEquationModel // [DI MODIFICATION] Added 5-Eq Model
     };
 
+    enum class GeometryMode {
+        Cartesian,
+        AxisymmetricXZ   // x = axial, y = radial in 2D
+    };
+
+
     // Enum for Euler Field Variables
     enum class EulerFieldVariables {
         DENS,   // Density
@@ -379,6 +385,11 @@ protected:
     void ComputeAndSetNewTimeStep();
     void ApplyBoundaryConditions(int lev, Set::Scalar time);
 
+    // Axisymmetric x-r ghost-cell parity at the r = 0 axis.
+    // x = axial, y = radial. Only active for 2D DI5 axisymmetric runs.
+    void ApplyAxisymmetricBoundaryConditions(int lev);
+    
+
     // [DI MODIFICATION] Templates for solver specialization
     template <SolverType solverType> void ComputeConservedVariables(int lev);
     template <SolverType solverType> void UpdateSolutions(int lev);
@@ -394,6 +405,31 @@ protected:
     Set::Field<Set::Scalar> ZFlux_mf;         // Z-dir Flux Vector
     Set::Field<Set::Scalar> PVec_mf;          // Primitive variables
     Set::Field<Set::Scalar> Pressure_mf;      // Pressure variable
+    GeometryMode geometry_mode = GeometryMode::Cartesian;
+
+    // Static geometric AMR tagging.
+// Used to create a fixed refined region near the initial bubble/wall.
+// If amr.regrid_int = -1, this refined hierarchy is built initially
+// and then remains fixed.
+bool enable_static_refinement = false;
+
+Set::Scalar static_refine_center_x = 0.0;
+Set::Scalar static_refine_center_y = 0.0;
+
+Set::Scalar static_refine_radius_lev0 = -1.0; // level 0 tags -> create level 1
+Set::Scalar static_refine_radius_lev1 = -1.0; // level 1 tags -> create level 2
+Set::Scalar static_refine_radius_lev2 = -1.0; // level 2 tags -> create level 3
+
+    // For axisymmetric runs in 2D:
+    // axial_dir = 0 (x), radial_dir = 1 (y)
+    int axial_dir  = 0;
+    int radial_dir = 1;
+
+    // Physical location of axis r = 0
+    Set::Scalar axis_origin = 0.0;
+
+    // Small regularization to avoid division by zero at axis
+    Set::Scalar axisymmetric_r_epsilon_factor = 0.5;
     
     // [DI MODIFICATION] Face-centered velocity for source term
     Set::Field<Set::Scalar> UFace_mf;         // X-dir Face Velocity (u_face / S_star)
@@ -414,6 +450,14 @@ protected:
     Set::Scalar di5_alpha_floor = 1.0e-12;
     Set::Scalar di5_pressure_floor = 1.0e-12;
     int di5_positivity_bisection_iters = 24;
+
+    bool axisymmetric_enabled = false;
+
+    // Keep this true for x-r bubble-collapse runs.
+    // It overrides the ylo ghost cells with correct even/odd parity.
+    bool axisymmetric_apply_axis_bc = true;
+
+ 
 
     // Refinement threshold values
     Set::Scalar density_refinement_criterion = 0.01;
