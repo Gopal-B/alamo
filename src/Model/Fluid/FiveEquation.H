@@ -14,30 +14,7 @@ namespace FiveEquation {
 /**
  * @class FluidMixture
  * @brief Two-material stiffened-gas mixture EOS utilities for the
- *        5-equation diffuse-interface (DI) model (Allaire/DualShockMV form).
- *
- * This implements the standard "Allaire" mixing for stiffened gas:
- *
- * Let alpha be the volume fraction of material-1 (so alpha2 = 1-alpha).
- * Define
- *   A(alpha) = alpha/(g1-1) + (1-alpha)/(g2-1)
- *   B(alpha) = alpha*g1*pi1/(g1-1) + (1-alpha)*g2*pi2/(g2-1)
- *
- * Then the mixture closure used in DualShockMV is:
- *   p = (rho*e_mix - B)/A
- *
- * Mixture gamma:
- *   g_mix = 1 + 1/A
- *
- * Define the mixture stiffening parameter pi_mix so that
- *   B = g_mix*pi_mix/(g_mix-1)
- * which gives
- *   pi_mix = ((g_mix-1)/g_mix) * (B/A)
- *
- * Sound speed:
- *   c^2 = g_mix * (p + pi_mix) / rho
- *
- * For ideal gas, set pi1=pi2=0.
+ *     
  */
 class FluidMixture {
 public:

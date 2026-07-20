@@ -69,9 +69,7 @@ void Shock::AddConstant(const int& lev, Set::Field<Set::Scalar>& a_phi, Set::Sca
         Util::ScimitarX_Util::Debug debug;
 
         Set::Scalar gamma = 1.4; // Used for Euler IC
-        // --- ADDITION: Dummy gammas for 5-eq IC ---
-        // These are only used to calculate ie_mix from p and rho.
-        // The real gammas are in the FluidMixture object in ScimitarX.
+  
         Set::Scalar gamma1 = 1.4; 
         Set::Scalar gamma2 = 1.4;
         // --- END ADDITION ---
