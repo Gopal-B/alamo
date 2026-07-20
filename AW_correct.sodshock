@@ -31,7 +31,7 @@ cflNumber           = 0.7
 TimeSteppingScheme  = RK3
 FluxScheme          = HLLC
 FluxReconstruction  = WENO
-WenoVariant         = WENOIS5
+WenoVariant         = WENOZ5
 ReconstructionMode  = Characteristic
 
 # ==========================================
