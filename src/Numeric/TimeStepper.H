@@ -156,8 +156,23 @@ public:
 
         // DI5 source-term support
         const bool use_source_term = (solver->fluid_mixture != nullptr);
-        
-        const bool axisymmetric = use_source_term && solver->axisymmetric_enabled;
+        const auto* mixture_model =
+            use_source_term ? solver->fluid_mixture.get() : nullptr;
+
+        const bool axisymmetric =
+            use_source_term && solver->axisymmetric_enabled;
+
+        const bool use_kapila_k =
+            use_source_term && solver->enable_kapila_k_source;
+
+        const Set::Scalar kapila_alpha_floor =
+            solver->kapila_k_alpha_floor;
+
+        const Set::Scalar kapila_denom_floor =
+            solver->kapila_k_denom_floor;
+
+        const bool kapila_limit =
+            solver->kapila_k_limit;
 
         int alpha_idx = -1;
         int m1_idx    = -1;
@@ -301,10 +316,53 @@ public:
                     // -------------------------------------------------
                     // Kapila alpha source: alpha * div(u)
                     // -------------------------------------------------
+                                        // -------------------------------------------------
+                    // Volume-fraction source
+                    //
+                    // Base advective form:
+                    //   ∂α/∂t + ∇·(αu) = α ∇·u
+                    //
+                    // Kapila form:
+                    //   ∂α/∂t + u·∇α = K ∇·u
+                    //
+                    // In the finite-volume split used here:
+                    // Cartesian:
+                    //   source = (α + K) div(u)
+                    //
+                    // Axisymmetric x-r:
+                    //   source = α div_cart(u) + K div_axi(u)
+                    //          = α(∂x ux + ∂r ur)
+                    //            + K(∂x ux + ∂r ur + ur/r)
+                    // -------------------------------------------------
                     if (use_source_term && n == alpha_idx) {
-                        flux_div -= alpha_stage * div_u;
-                    }
+                        Set::Scalar source_term =
+                            alpha_stage * div_u;
 
+                        if (use_kapila_k) {
+                            Set::Scalar div_u_k = div_u;
+
+#if (AMREX_SPACEDIM == 2)
+                            if (axisymmetric) {
+                                div_u_k += ur_stage / r_cyl;
+                            }
+#endif
+
+                            const Set::Scalar K_stage =
+                                mixture_model->kapila_K(
+                                    alpha_stage,
+                                    m1_stage,
+                                    m2_stage,
+                                    p_stage,
+                                    kapila_alpha_floor,
+                                    kapila_denom_floor,
+                                    kapila_limit
+                                );
+
+                            source_term += K_stage * div_u_k;
+                        }
+
+                        flux_div -= source_term;
+                    }
                     // -------------------------------------------------
                     // Axisymmetric geometric source terms
                     // 2D only, x = axial, y = radial
