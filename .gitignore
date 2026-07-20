@@ -53,3 +53,43 @@ compile_commands.json
 .pyright-override.toml
 .clangd
 .DS_Store
+# Build folders and compiled files
+build/
+*.o
+*.so
+*.a
+*.exe
+*.mod
+
+# AMReX / simulation outputs
+plt*/
+chk*/
+Backtrace.*
+*.out
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editors
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Large generated visualization/data outputs
+*.vtk
+*.vtu
+*.pvtu
+*.visit
+*.mp4
+*.avi
+

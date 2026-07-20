@@ -1,0 +1,105 @@
+# ==========================================
+# Simulation Control
+# ==========================================
+plot_file = AWtest
+
+timestep  = 1.0e-7
+stop_time = .229e-03
+max_step  = 100000
+
+# ==========================================
+# AMR / Grid Parameters (2D)
+# ==========================================
+amr.plot_int        = 200
+amr.max_level       = 0
+amr.n_cell          = 2000 4 1
+amr.blocking_factor = 1
+amr.regrid_int      = -1
+amr.grid_eff        = 1.0
+
+# Domain (2D: y is thin; z is placeholder)
+geometry.prob_lo     = 0.0 0.0 0.0
+geometry.prob_hi     = 1.0 0.1 0.1
+geometry.is_periodic = 0 0 0
+
+# ==========================================
+# Solver Configuration
+# ==========================================
+SolverType          = SolveFiveEquationModel
+cflNumber           = 0.7
+
+TimeSteppingScheme  = RK3
+FluxScheme          = HLLC
+FluxReconstruction  = WENO
+WenoVariant         = WENOZ5
+ReconstructionMode  = Characteristic
+
+# ==========================================
+# Physics Constants (stiffened gas / ideal gas)
+# Phase-1 = water, Phase-2 = air (as per your naming)
+# ==========================================
+ic.shock.pvec.gamma1 = 4.4
+ic.shock.pvec.gamma2 = 1.4
+ic.shock.pvec.pi1    = 6e8
+ic.shock.pvec.pi2    = 0.0
+
+
+# ==========================================
+# Initial Conditions
+# Shock interface at x = 0.7, xdir
+# ==========================================
+ic.pvec.type        = shock
+ic.pressure.type    = shock
+
+ic.shock.count      = 1
+ic.shock.positions  = 0.7
+ic.shock.direction  = xdir
+
+# --- Five-equation primitive ICs 
+# Provide rho1 and rho2 in every zone; alpha selects which phase is present.
+# Zone 0: x < 0.7  => water (alpha=1)
+# Zone 1: x > 0.7  => air   (alpha=0)
+
+ic.shock.pvec.rho1   = 1000  1000   # water reference density everywhere
+ic.shock.pvec.rho2   = 50   50    # air reference density everywhere
+
+ic.shock.pvec.alpha  = 1.0     0.0
+
+ic.shock.pvec.uvel   = 0.0     0.0
+ic.shock.pvec.vvel   = 0.0     0.0
+# ic.shock.pvec.wvel omitted in 2D
+
+# Pressure IC (separate pressure MultiFab in your setup)
+ic.shock.pressure    = 1.0e9  1.0e5
+
+# ==========================================
+# Boundary Conditions
+# 6 components: [M1, M2, MOMX, MOMY, ETOT, ALPHA]
+# ==========================================
+bc.pvec.type.xlo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.xhi = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.ylo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.yhi = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.zlo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.zhi = neumann neumann neumann neumann neumann neumann
+
+bc.pvec.val.xlo  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.xhi  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.ylo  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.yhi  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.zlo  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.zhi  = 0.0 0.0 0.0 0.0 0.0 0.0
+
+bc.pressure.type.xlo = neumann
+bc.pressure.type.xhi = neumann
+bc.pressure.type.ylo = neumann
+bc.pressure.type.yhi = neumann
+bc.pressure.type.zlo = neumann
+bc.pressure.type.zhi = neumann
+
+bc.pressure.val.xlo = 0.0
+bc.pressure.val.xhi = 0.0
+bc.pressure.val.ylo = 0.0
+bc.pressure.val.yhi = 0.0
+bc.pressure.val.zlo = 0.0
+bc.pressure.val.zhi = 0.0

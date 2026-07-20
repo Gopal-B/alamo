@@ -37,8 +37,7 @@ CompressibleEulerVariableAccessor::CreateWorkingBuffer(
     );
 }
 
-// Implementations of other methods remain similar to previous version
-// with added validation and more flexible handling
+
 
 int 
 CompressibleEulerVariableAccessor::getRequiredGhostCells(
@@ -56,7 +55,7 @@ CompressibleEulerVariableAccessor::getRequiredGhostCells(
 }
     
 
-// Add these implementations to IntegratorVariableAccessLayer.cpp
+
 
 void 
 CompressibleEulerVariableAccessor::CopyVariables(
