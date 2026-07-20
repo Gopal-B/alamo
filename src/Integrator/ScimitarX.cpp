@@ -5,7 +5,6 @@
 #include "BC/Constant.H"
 #include "IC/Shock.H"
 #include "IC/Riemann2D.H"
-#include "IC/ShockDroplet.H"
 #include "Model/Fluid/Fluid.H"
 #include "Numeric/Stencil.H"
 #include "Numeric/NumericTypes.H"
@@ -399,7 +398,12 @@ void ScimitarX::SetupNumericComponents()
             } else if (weno_variant == Numeric::WenoVariant::WENOJS5) {
                 Util::Message(INFO, "Creating WENOJS5 reconstruction");                
                 fluxHandler->SetReconstruction(std::make_shared<Numeric::WENOJS5<ScimitarX>>());
-            } else {
+            } else if (weno_variant == Numeric::WenoVariant::WENOIS5) {
+                Util::Message(INFO, "Creating WENOIS5 reconstruction");                
+                fluxHandler->SetReconstruction(std::make_shared<Numeric::WENOIS5<ScimitarX>>());
+            } 
+            
+            else {
                 Util::Message(INFO, "Creating WENOZ5 reconstruction");                
                 fluxHandler->SetReconstruction(std::make_shared<Numeric::WENOZ5<ScimitarX>>());
             }
@@ -669,29 +673,25 @@ ScimitarX::Parse(ScimitarX& value, IO::ParmParse& pp)
     // Initial Conditions
     {
         std::string type = "constant";
-        pp.query("ic.pvec.type", type);
-    
+        pp.query("ic.pvec.type", type);  // IC condition type for Primitive Variables
+
         if (type == "shock") {
             value.ic_PVec = new IC::Shock(value.geom, pp, "ic.shock.pvec", ScimitarX::variableIndex);
         } else if (type == "riemann2d") {
             value.ic_PVec = new IC::Riemann2D(value.geom, pp, "ic.riemann2d.pvec", ScimitarX::variableIndex);
-        } else if (type == "shockdroplet") {
-            value.ic_PVec = new IC::ShockDroplet(value.geom, pp, "ic.shockdroplet.pvec", ScimitarX::variableIndex);
         } else {
             Util::Abort(__FILE__, __func__, __LINE__, "Invalid ic.pvec.type: " + type);
         }
-    
-        pp.query("ic.pressure.type", type);
+
+        pp.query("ic.pressure.type", type); // IC condition type for pressure 
         if (type == "shock") {
             value.ic_Pressure = new IC::Shock(value.geom, pp, "ic.shock.pressure");
         } else if (type == "riemann2d") {
             value.ic_Pressure = new IC::Riemann2D(value.geom, pp, "ic.riemann2d.pressure");
-        } else if (type == "shockdroplet") {
-            value.ic_Pressure = new IC::ShockDroplet(value.geom, pp, "ic.shockdroplet.pressure");
         } else {
             Util::Abort(__FILE__, __func__, __LINE__, "Invalid ic.pressure.type: " + type);
         }
-    }
+    } 
 
     std::string reconstr_str = "FirstOrder";  // Default
     pp.query("FluxReconstruction", reconstr_str);  // Read flux reconstruction method

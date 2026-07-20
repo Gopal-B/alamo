@@ -21,6 +21,7 @@ namespace Numeric {
             case WenoVariant::WENOJS5: return "WENOJS5";
             case WenoVariant::WENOZ5: return "WENOZ5";
             case WenoVariant::WENOJS3: return "WENOJS3";
+            case WenoVariant::WENOIS5: return "WENOIS5";
             default: throw std::runtime_error("Unknown WENO Variant");
         }
     }
@@ -62,6 +63,7 @@ namespace Numeric {
         if (str == "WENOJS5") return WenoVariant::WENOJS5;
         if (str == "WENOZ5") return WenoVariant::WENOZ5;
         if (str == "WENOJS3") return WenoVariant::WENOJS3;
+        if (str == "WENOIS5") return WenoVariant::WENOIS5;
         throw std::runtime_error("Invalid WENO Variant: " + str);
     }
 
