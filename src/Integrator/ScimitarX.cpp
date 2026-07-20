@@ -780,21 +780,13 @@ ScimitarX::Parse(ScimitarX& value, IO::ParmParse& pp)
     pp.query_default("di5_positivity_bisection_iters",
                      value.di5_positivity_bisection_iters, 24);
 
-                     pp.query_default("enable_kapila_k_source",
-                        value.enable_kapila_k_source,
+    pp.query_default("di5.apply_xlo_slip_wall",
+                        value.di5_apply_xlo_slip_wall,
                         false);
-   
-       pp.query_default("kapila_k_alpha_floor",
-                        value.kapila_k_alpha_floor,
-                        Set::Scalar(1.0e-10));
-   
-       pp.query_default("kapila_k_denom_floor",
-                        value.kapila_k_denom_floor,
-                        Set::Scalar(1.0e-20));
-   
-       pp.query_default("kapila_k_limit",
-                        value.kapila_k_limit,
-                        true);
+       
+    pp.query_default("di5.debug_boundary_parity",
+                        value.di5_debug_boundary_parity,
+                        false);
 
 
                      // Static initial AMR region around bubble/wall.
@@ -1212,18 +1204,201 @@ void ScimitarX::AdvanceInTimeWithoutStiffTerms(int lev, Set::Scalar time, Set::S
 
 void ScimitarX::ApplyBoundaryConditions(int lev, Set::Scalar time) {
 
+    // Generic input-driven BCs.
     Integrator::ApplyPatch(lev, time, PVec_mf, *PVec_mf[lev], *bc_PVec, 0);
     Integrator::ApplyPatch(lev, time, Pressure_mf, *Pressure_mf[lev], *bc_Pressure, 0);
 
-    // QVec is mostly rebuilt from PVec for this solver, but keeping its physical
-    // ghosts consistent avoids surprises if later diagnostics/source terms use Q ghosts.
+    // QVec is normally rebuilt from PVec, but fill physical ghosts defensively.
     Integrator::ApplyPatch(lev, time, QVec_mf, *QVec_mf[lev], bc_nothing, 0);
+    Integrator::ApplyPatch(lev, time, QVec_old_mf, *QVec_old_mf[lev], bc_nothing, 0);
 
+    // Explicit DI5 rigid slip wall at xlo.
+    // This overwrites xlo ghosts with the exact even/odd parity needed
+    // for near-wall collapse.
+    if (solverType == SolverType::SolveFiveEquationModel && di5_apply_xlo_slip_wall) {
+        ApplyDI5XloSlipWallBoundaryConditions(lev);
+    }
+
+    // Axis r = 0 parity should be applied after xlo wall filling
+    // so the xlo-ylo corner remains axis-consistent.
     if (axisymmetric_enabled && axisymmetric_apply_axis_bc) {
         ApplyAxisymmetricBoundaryConditions(lev);
     }
+
+    if (di5_debug_boundary_parity) {
+        DebugCheckDI5BoundaryParity(lev, "after ApplyBoundaryConditions");
+    }
 }
 
+
+void ScimitarX::DebugCheckDI5BoundaryParity(int lev, const char* tag)
+{
+#if AMREX_SPACEDIM != 2
+    (void)lev;
+    (void)tag;
+    return;
+#else
+    if (solverType != SolverType::SolveFiveEquationModel) return;
+
+    const amrex::Box& dom = geom[lev].Domain();
+    const int ilo = dom.smallEnd(0);
+    const int jlo = dom.smallEnd(1);
+
+    const int m1_idx    = variableIndex.M1;
+    const int m2_idx    = variableIndex.M2;
+    const int momx_idx  = variableIndex.MOMX;
+    const int momy_idx  = variableIndex.MOMY;
+    const int alpha_idx = variableIndex.ALPHA;
+
+    for (amrex::MFIter mfi(*PVec_mf[lev]); mfi.isValid(); ++mfi) {
+        const amrex::Box& vbx = mfi.validbox();
+
+        if (vbx.smallEnd(0) != ilo) continue;
+
+        auto const& p = PVec_mf.Patch(lev, mfi);
+
+        const int iG = ilo - 1;
+        const int iM = ilo;
+        const int j  = amrex::min(jlo + 4, vbx.bigEnd(1));
+        const int k  = 0;
+
+        amrex::Print()
+            << "[DI5 BC DEBUG] " << tag << " lev=" << lev
+            << " xlo parity check at j=" << j << "\n"
+            << "  ux_ghost + ux_mirror = "
+            << p(iG,j,k,momx_idx) + p(iM,j,k,momx_idx) << "\n"
+            << "  ur_ghost - ur_mirror = "
+            << p(iG,j,k,momy_idx) - p(iM,j,k,momy_idx) << "\n"
+            << "  alpha_ghost - alpha_mirror = "
+            << p(iG,j,k,alpha_idx) - p(iM,j,k,alpha_idx) << "\n"
+            << "  rho1_ghost - rho1_mirror = "
+            << p(iG,j,k,m1_idx) - p(iM,j,k,m1_idx) << "\n"
+            << "  rho2_ghost - rho2_mirror = "
+            << p(iG,j,k,m2_idx) - p(iM,j,k,m2_idx) << "\n";
+
+        break;
+    }
+#endif
+}
+void ScimitarX::ApplyDI5XloSlipWallBoundaryConditions(int lev)
+{
+#if AMREX_SPACEDIM < 2
+    return;
+#else
+    if (solverType != SolverType::SolveFiveEquationModel) return;
+
+    const amrex::Box& dom = geom[lev].Domain();
+    const int ilo = dom.smallEnd(0);
+    const int ng  = number_of_ghost_cells;
+
+    const int m1_idx    = variableIndex.M1;
+    const int m2_idx    = variableIndex.M2;
+    const int momx_idx  = variableIndex.MOMX;
+    const int momy_idx  = variableIndex.MOMY;
+    const int etot_idx  = variableIndex.ETOT;
+    const int alpha_idx = variableIndex.ALPHA;
+
+    // ------------------------------------------------------------
+    // PVec parity at xlo:
+    // even: rho1, rho2, u_r, ie_mix, alpha
+    // odd : u_x
+    // ------------------------------------------------------------
+    for (amrex::MFIter mfi(*PVec_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const amrex::Box& vbx = mfi.validbox();
+        if (vbx.smallEnd(0) != ilo) continue;
+
+        amrex::Box gbx = vbx;
+        gbx.grow(ng);
+        gbx.setSmall(0, ilo - ng);
+        gbx.setBig  (0, ilo - 1);
+
+        auto const& p = PVec_mf.Patch(lev, mfi);
+
+        amrex::ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            const int im = 2*ilo - 1 - i;
+
+            p(i,j,k,m1_idx)    =  p(im,j,k,m1_idx);
+            p(i,j,k,m2_idx)    =  p(im,j,k,m2_idx);
+            p(i,j,k,momx_idx)  = -p(im,j,k,momx_idx);  // wall-normal velocity odd
+            p(i,j,k,momy_idx)  =  p(im,j,k,momy_idx);  // tangential/radial velocity even
+            p(i,j,k,etot_idx)  =  p(im,j,k,etot_idx);
+            p(i,j,k,alpha_idx) =  p(im,j,k,alpha_idx);
+        });
+    }
+
+    // ------------------------------------------------------------
+    // Pressure parity: even.
+    // ------------------------------------------------------------
+    for (amrex::MFIter mfi(*Pressure_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const amrex::Box& vbx = mfi.validbox();
+        if (vbx.smallEnd(0) != ilo) continue;
+
+        amrex::Box gbx = vbx;
+        gbx.grow(ng);
+        gbx.setSmall(0, ilo - ng);
+        gbx.setBig  (0, ilo - 1);
+
+        auto const& p = Pressure_mf.Patch(lev, mfi);
+
+        amrex::ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            const int im = 2*ilo - 1 - i;
+            p(i,j,k,0) = p(im,j,k,0);
+        });
+    }
+
+    // ------------------------------------------------------------
+    // QVec parity at xlo:
+    // even: m1, m2, rho*u_r, rhoE, alpha
+    // odd : rho*u_x
+    // ------------------------------------------------------------
+    for (amrex::MFIter mfi(*QVec_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const amrex::Box& vbx = mfi.validbox();
+        if (vbx.smallEnd(0) != ilo) continue;
+
+        amrex::Box gbx = vbx;
+        gbx.grow(ng);
+        gbx.setSmall(0, ilo - ng);
+        gbx.setBig  (0, ilo - 1);
+
+        auto const& q = QVec_mf.Patch(lev, mfi);
+
+        amrex::ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            const int im = 2*ilo - 1 - i;
+
+            q(i,j,k,m1_idx)    =  q(im,j,k,m1_idx);
+            q(i,j,k,m2_idx)    =  q(im,j,k,m2_idx);
+            q(i,j,k,momx_idx)  = -q(im,j,k,momx_idx);
+            q(i,j,k,momy_idx)  =  q(im,j,k,momy_idx);
+            q(i,j,k,etot_idx)  =  q(im,j,k,etot_idx);
+            q(i,j,k,alpha_idx) =  q(im,j,k,alpha_idx);
+        });
+    }
+
+    // Same parity for QVec_old, useful for RK diagnostics and restart safety.
+    for (amrex::MFIter mfi(*QVec_old_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const amrex::Box& vbx = mfi.validbox();
+        if (vbx.smallEnd(0) != ilo) continue;
+
+        amrex::Box gbx = vbx;
+        gbx.grow(ng);
+        gbx.setSmall(0, ilo - ng);
+        gbx.setBig  (0, ilo - 1);
+
+        auto const& q = QVec_old_mf.Patch(lev, mfi);
+
+        amrex::ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+            const int im = 2*ilo - 1 - i;
+
+            q(i,j,k,m1_idx)    =  q(im,j,k,m1_idx);
+            q(i,j,k,m2_idx)    =  q(im,j,k,m2_idx);
+            q(i,j,k,momx_idx)  = -q(im,j,k,momx_idx);
+            q(i,j,k,momy_idx)  =  q(im,j,k,momy_idx);
+            q(i,j,k,etot_idx)  =  q(im,j,k,etot_idx);
+            q(i,j,k,alpha_idx) =  q(im,j,k,alpha_idx);
+        });
+    }
+#endif
+}
 void ScimitarX::ApplyAxisymmetricBoundaryConditions(int lev) {
     #if AMREX_SPACEDIM != 2
         return;
