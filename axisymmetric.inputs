@@ -1,0 +1,198 @@
+# ================================================================
+# Free spherical air-bubble collapse in water: PR20
+# Current axisymmetric implementation
+# Uniform non-AMR mesh, about 50 cells across initial bubble diameter
+
+#
+# Current implementation convention:
+#   x = axial direction
+#   y = radial direction r
+#   y = 0 is the axis of symmetry
+#
+# Domain:
+#   x in [0.0, 0.1]
+#   r in [0.0, 0.05]
+#
+# Mesh:
+#   nx = 2500
+#   nr = 1250
+#   dx = dr = 4.0e-5 m
+#   D0 / dx = 2.0e-3 / 4.0e-5 = 50 cells across diameter
+#
+# No AMR.
+# ================================================================
+
+plot_file = BubbleCollapse_
+
+# ------------------------------------------------
+# Run control
+# ------------------------------------------------
+timestep  = 1.0e-8
+stop_time = 4.0e-5
+max_step  = 10000000
+
+# ------------------------------------------------
+# Grid / domain
+# ------------------------------------------------
+amr.plot_int        = 25
+amr.max_level       = 0
+amr.n_cell          = 2500 1250 1
+amr.blocking_factor = 1
+amr.max_grid_size   = 64
+amr.regrid_int      = -1
+amr.base_regrid_int = 0
+amr.grid_eff        = 1.0
+
+geometry.prob_lo     = 0.0   0.0   0.0
+geometry.prob_hi     = 0.1   0.05  0.1
+geometry.is_periodic = 0 0 0
+
+# ------------------------------------------------
+# Axisymmetric model
+# Current implementation flags
+# ------------------------------------------------
+axisymmetric.enabled       = 1
+axisymmetric.radial_dir    = 1
+axisymmetric.axis_location = 0.0
+axisymmetric.radius_floor  = 1.0e-300
+
+# ------------------------------------------------
+# Solver
+# ------------------------------------------------
+SolverType          = SolveFiveEquationModel
+cflNumber           = 0.50
+
+TimeSteppingScheme  = RK3
+FluxScheme          = HLLC
+
+FluxReconstruction  = WENO
+WenoVariant         = WENOIS5
+ReconstructionMode  = Primitive
+
+# ------------------------------------------------
+# EOS
+#
+# Current implementation convention for this IC:
+#   phase 1 = water
+#   phase 2 = air
+#
+# With phase1_is_liquid = 0 below:
+#   outside bubble -> ambient.* -> phase 1 water
+#   inside bubble  -> liquid.*  -> phase 2 air
+# ------------------------------------------------
+ic.shock.pvec.gamma1 = 4.4
+ic.shock.pvec.gamma2 = 1.4
+ic.shock.pvec.pi1    = 6.0e8
+ic.shock.pvec.pi2    = 0.0
+
+# ------------------------------------------------
+# Initial condition
+# ------------------------------------------------
+ic.pvec.type     = shockdroplet
+ic.pressure.type = shockdroplet
+
+# ------------------------------------------------
+# Driver region
+
+# ------------------------------------------------
+ic.shockdroplet.geometry.x_driver_lo = 0.0
+ic.shockdroplet.geometry.x_driver_hi = 1.0e-8
+ic.shockdroplet.geometry.y_driver_lo = 0.0
+ic.shockdroplet.geometry.y_driver_hi = 0.05
+
+# ------------------------------------------------
+# Bubble geometry
+# ------------------------------------------------
+ic.shockdroplet.geometry.droplet_center_x = 5.0e-2
+ic.shockdroplet.geometry.droplet_center_y = 0.0
+ic.shockdroplet.geometry.droplet_radius   = 1.0e-3
+
+# dx = 4.0e-5 m.
+# One-cell interface smoothing.
+# If visually too sharp/noisy, change to 8.0e-5.
+ic.shockdroplet.geometry.interface_thickness = 4.0e-5
+
+# ------------------------------------------------
+# Phase convention for current ShockDroplet IC
+#
+# Keep this as 0:
+#   outside = ambient.* = water = phase 1
+#   inside  = liquid.*  = air   = phase 2
+# ------------------------------------------------
+ic.shockdroplet.phase1_is_liquid = 0
+
+# ------------------------------------------------
+# Outside medium = water
+# p_water / p_air = 20
+# ------------------------------------------------
+ic.shockdroplet.ambient.rho = 998.2
+ic.shockdroplet.ambient.p   = 2.0265e6
+ic.shockdroplet.ambient.u   = 0.0
+ic.shockdroplet.ambient.v   = 0.0
+
+# ------------------------------------------------
+# Driver = same as surrounding water
+# ------------------------------------------------
+ic.shockdroplet.driver.rho = 998.2
+ic.shockdroplet.driver.p   = 2.0265e6
+ic.shockdroplet.driver.u   = 0.0
+ic.shockdroplet.driver.v   = 0.0
+
+# ------------------------------------------------
+# Inside bubble = low-pressure air
+# ------------------------------------------------
+ic.shockdroplet.liquid.rho = 1.225
+ic.shockdroplet.liquid.p   = 1.01325e5
+ic.shockdroplet.liquid.u   = 0.0
+ic.shockdroplet.liquid.v   = 0.0
+
+# ------------------------------------------------
+# Boundary conditions
+#
+# ylo is the symmetry axis.
+# These ylo Neumann entries are placeholders.
+# The custom axisymmetric parity boundary overwrites ylo.
+# ------------------------------------------------
+bc.pvec.type.xlo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.xhi = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.ylo = neumann neumann neumann neumann neumann neumann
+bc.pvec.type.yhi = neumann neumann neumann neumann neumann neumann
+
+bc.pvec.val.xlo  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.xhi  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.ylo  = 0.0 0.0 0.0 0.0 0.0 0.0
+bc.pvec.val.yhi  = 0.0 0.0 0.0 0.0 0.0 0.0
+
+bc.pressure.type.xlo = neumann
+bc.pressure.type.xhi = neumann
+bc.pressure.type.ylo = neumann
+bc.pressure.type.yhi = neumann
+
+bc.pressure.val.xlo = 0.0
+bc.pressure.val.xhi = 0.0
+bc.pressure.val.ylo = 0.0
+bc.pressure.val.yhi = 0.0
+
+# ------------------------------------------------
+# Disable all AMR/refinement logic
+# ------------------------------------------------
+enable_density_refinement      = 0
+density_refinement_criterion   = 0.02
+
+enable_pressure_refinement     = 0
+pressure_refinement_criterion  = 0.02
+
+enable_velocity_refinement     = 0
+velocity_refinement_criterion  = 0.05
+
+enable_vorticity_refinement    = 0
+vorticity_refinement_criterion = 0.05
+
+# ------------------------------------------------
+# DI5 positivity controls
+# ------------------------------------------------
+enable_di5_face_positivity     = 1
+di5_partial_density_floor      = 1.0e-12
+di5_alpha_floor                = 1.0e-12
+di5_pressure_floor             = 1.0e-8
+di5_positivity_bisection_iters = 24
