@@ -780,31 +780,99 @@ ScimitarX::Parse(ScimitarX& value, IO::ParmParse& pp)
     pp.query_default("di5_positivity_bisection_iters",
                      value.di5_positivity_bisection_iters, 24);
 
-    pp.query_default("di5_thinc_alpha_jump_min",
-    value.di5_thinc_alpha_jump_min, Set::Scalar(5.0e-2));
+                     pp.query_default("enable_kapila_k_source",
+                        value.enable_kapila_k_source,
+                        false);
+   
+       pp.query_default("kapila_k_alpha_floor",
+                        value.kapila_k_alpha_floor,
+                        Set::Scalar(1.0e-10));
+   
+       pp.query_default("kapila_k_denom_floor",
+                        value.kapila_k_denom_floor,
+                        Set::Scalar(1.0e-20));
+   
+       pp.query_default("kapila_k_limit",
+                        value.kapila_k_limit,
+                        true);
 
-pp.query_default("di5_thinc_max_pressure_jump",
-    value.di5_thinc_max_pressure_jump, Set::Scalar(2.0e-1));
 
+                     // Static initial AMR region around bubble/wall.
+// These tags are used to build initial nested grids.
+// With amr.regrid_int = -1, the grids do not move later.
+pp.query_default("amr.static_refinement.enabled",
+    value.enable_static_refinement,
+    false);
 
-                        // 5-equation THINC controls
-    pp.query_default("enable_di5_thinc",
-        value.enable_di5_thinc, false);
+pp.query_default("amr.static_refinement.center_x",
+    value.static_refine_center_x,
+    Set::Scalar(0.0));
 
-    pp.query_default("di5_thinc_beta",
-        value.di5_thinc_beta, Set::Scalar(1.50));
+pp.query_default("amr.static_refinement.center_y",
+    value.static_refine_center_y,
+    Set::Scalar(0.0));
 
-    pp.query_default("di5_thinc_clip_eps",
-            value.di5_thinc_clip_eps, Set::Scalar(1.0e-8));
-            
-    pp.query_default("di5_thinc_alpha_eps",
-                value.di5_thinc_alpha_eps, Set::Scalar(1.0e-3));
-            
-    pp.query_default("di5_thinc_clip_eps",
-                value.di5_thinc_clip_eps, Set::Scalar(1.0e-12));
-            
-    pp.query_default("di5_thinc_require_monotone",
-                value.di5_thinc_require_monotone, true);
+pp.query_default("amr.static_refinement.radius_lev0",
+    value.static_refine_radius_lev0,
+    Set::Scalar(-1.0));
+
+pp.query_default("amr.static_refinement.radius_lev1",
+    value.static_refine_radius_lev1,
+    Set::Scalar(-1.0));
+
+pp.query_default("amr.static_refinement.radius_lev2",
+    value.static_refine_radius_lev2,
+    Set::Scalar(-1.0));
+
+    {
+    std::string geom_mode = "cartesian";
+    pp.query("geometry.mode", geom_mode);
+
+    if (geom_mode == "cartesian") {
+        value.geometry_mode = GeometryMode::Cartesian;
+    } else if (geom_mode == "axisymmetric_xz" || geom_mode == "axisymmetric_rz" || geom_mode == "axisymmetric") {
+        value.geometry_mode = GeometryMode::AxisymmetricXZ;
+    } else {
+        Util::Abort(INFO, "Invalid geometry.mode. Use 'cartesian' or 'axisymmetric_xz'.");
+    }
+    value.axisymmetric_enabled =(value.geometry_mode == GeometryMode::AxisymmetricXZ);
+    pp.query_default("geometry.axial_dir",  value.axial_dir,  0);
+    pp.query_default("geometry.radial_dir", value.radial_dir, 1);
+    pp.query_default("geometry.axis_origin", value.axis_origin, Set::Scalar(0.0));
+    pp.query_default("geometry.axisymmetric_r_epsilon_factor",
+                     value.axisymmetric_r_epsilon_factor,
+                     Set::Scalar(0.5));
+    pp.query_default("geometry.axisymmetric_apply_axis_bc",
+                     value.axisymmetric_apply_axis_bc,
+                     true);
+    
+    if (value.geometry_mode == GeometryMode::AxisymmetricXZ) {
+    #if AMREX_SPACEDIM != 2
+        Util::Abort(INFO, "AxisymmetricXZ currently supported only in 2D.");
+    #endif
+    
+        if (value.axial_dir != 0 || value.radial_dir != 1) {
+            Util::Abort(INFO,
+                "AxisymmetricXZ currently requires geometry.axial_dir = 0 and geometry.radial_dir = 1.");
+        }
+    
+        const Set::Scalar ylo = value.geom[0].ProbLo(1);
+        if (std::abs(ylo - value.axis_origin) > Set::Scalar(1.0e-14)) {
+            Util::Abort(INFO,
+                "Axisymmetric run requires geometry.prob_lo[1] == geometry.axis_origin. "
+                "For bubble collapse use ylo = 0 and axis_origin = 0.");
+        }
+    
+        if (value.axisymmetric_r_epsilon_factor <= Set::Scalar(0.0)) {
+            Util::Abort(INFO,
+                "geometry.axisymmetric_r_epsilon_factor must be positive. "
+                "Use 0.5 for a finite-volume grid with first cell center at r = dr/2.");
+        }
+    
+        Util::Message(INFO,
+            "AxisymmetricXZ enabled: x = axial, y = radial, axis at ylo.");
+    }
+}
 
     // Add these to your Parse method
     pp.query_default("enable_density_refinement", value.enable_density_refinement, true); // enable density refinement
@@ -869,7 +937,8 @@ void ScimitarX::Initialize(int lev)
             });
         }
     }
-    
+    // This is essential for WENO/flux reconstruction near the axis.
+    ApplyBoundaryConditions(lev, Set::Scalar(0.0));
     // [DI MODIFICATION] Dispatch to specialized function
     if (solverType == SolverType::SolveFiveEquationModel) {
         ComputeConservedVariables<SolverType::SolveFiveEquationModel>(lev);
@@ -883,6 +952,7 @@ void ScimitarX::Initialize(int lev)
     else {
         Util::Abort("ScimitarX::Initialize: Unknown solverType");
     }
+    // Fill physical ghost cells before constructing conserved variables.
     
     std::swap(*QVec_old_mf[lev], *QVec_mf[lev]); 
     
@@ -894,6 +964,29 @@ void ScimitarX::TagCellsForRefinement(int lev, amrex::TagBoxArray& tags, Set::Sc
     const Set::Scalar* DX = geom[lev].CellSize();
     Set::Scalar dr = sqrt(AMREX_D_TERM(DX[0] * DX[0], +DX[1] * DX[1], +DX[2] * DX[2]));
 
+    Set::Scalar static_radius = Set::Scalar(-1.0);
+
+if (lev == 0) {
+    static_radius = static_refine_radius_lev0;
+} else if (lev == 1) {
+    static_radius = static_refine_radius_lev1;
+} else if (lev == 2) {
+    static_radius = static_refine_radius_lev2;
+}
+
+const bool use_static_refinement =
+    enable_static_refinement && static_radius > Set::Scalar(0.0);
+
+const Set::Scalar static_cx = static_refine_center_x;
+const Set::Scalar static_cy = static_refine_center_y;
+const Set::Scalar static_r2 = static_radius * static_radius;
+
+const Set::Scalar prob_lo_x = geom[lev].ProbLo(0);
+
+#if AMREX_SPACEDIM >= 2
+const Set::Scalar prob_lo_y = geom[lev].ProbLo(1);
+#endif
+
     // Loop through all cells in the level for tagging
     for (amrex::MFIter mfi(*PVec_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
         const amrex::Box& bx = mfi.tilebox();
@@ -903,6 +996,32 @@ void ScimitarX::TagCellsForRefinement(int lev, amrex::TagBoxArray& tags, Set::Sc
 
         amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
             auto sten = Numeric::GetStencil(i, j, k, bx);
+
+
+            // ------------------------------------------------------------
+// Static geometric refinement around the initial bubble/wall.
+// ------------------------------------------------------------
+if (use_static_refinement) {
+    const Set::Scalar x =
+        prob_lo_x + (Set::Scalar(i) + Set::Scalar(0.5)) * DX[0];
+
+#if AMREX_SPACEDIM >= 2
+    const Set::Scalar y =
+        prob_lo_y + (Set::Scalar(j) + Set::Scalar(0.5)) * DX[1];
+#else
+    const Set::Scalar y = Set::Scalar(0.0);
+#endif
+
+    const Set::Scalar dx0 = x - static_cx;
+    const Set::Scalar dy0 = y - static_cy;
+
+    const Set::Scalar dist2 = dx0 * dx0 + dy0 * dy0;
+
+    if (dist2 <= static_r2) {
+        tags_arr(i, j, k) = amrex::TagBox::SET;
+        return;
+    }
+}
 
             // 1. Density gradient criterion
             if (enable_density_refinement) {
@@ -1044,6 +1163,8 @@ void ScimitarX::AdvanceInTimeWithoutStiffTerms(int lev, Set::Scalar time, Set::S
             int numStages = timeStepper->GetNumberOfStages();
 
             for (int stage = 0; stage < numStages; ++stage) {
+
+                ApplyBoundaryConditions(lev, time);
                 // 1. Compute Conserved Variables
                 // [DI MODIFICATION] Dispatch
                 if (solverType == SolverType::SolveFiveEquationModel) {
@@ -1090,13 +1211,150 @@ void ScimitarX::AdvanceInTimeWithoutStiffTerms(int lev, Set::Scalar time, Set::S
 
 
 void ScimitarX::ApplyBoundaryConditions(int lev, Set::Scalar time) {
-        
-        Integrator::ApplyPatch(lev, time, PVec_mf, *PVec_mf[lev], *bc_PVec, 0);        
-        Integrator:: ApplyPatch(lev, time, Pressure_mf, *Pressure_mf[lev], *bc_Pressure, 0); 
-        
-        Integrator::ApplyPatch(lev, time, QVec_mf, *QVec_mf[lev], bc_nothing, 0);        
+
+    Integrator::ApplyPatch(lev, time, PVec_mf, *PVec_mf[lev], *bc_PVec, 0);
+    Integrator::ApplyPatch(lev, time, Pressure_mf, *Pressure_mf[lev], *bc_Pressure, 0);
+
+    // QVec is mostly rebuilt from PVec for this solver, but keeping its physical
+    // ghosts consistent avoids surprises if later diagnostics/source terms use Q ghosts.
+    Integrator::ApplyPatch(lev, time, QVec_mf, *QVec_mf[lev], bc_nothing, 0);
+
+    if (axisymmetric_enabled && axisymmetric_apply_axis_bc) {
+        ApplyAxisymmetricBoundaryConditions(lev);
+    }
 }
 
+void ScimitarX::ApplyAxisymmetricBoundaryConditions(int lev) {
+    #if AMREX_SPACEDIM != 2
+        return;
+    #else
+        if (!axisymmetric_enabled) return;
+        if (axial_dir != 0 || radial_dir != 1) {
+            Util::Abort(INFO,
+                "ApplyAxisymmetricBoundaryConditions assumes x = axial and y = radial.");
+        }
+    
+        const amrex::Box& dom = geom[lev].Domain();
+        const int jlo = dom.smallEnd(1);
+        const int ng  = number_of_ghost_cells;
+    
+        const Set::Scalar ylo = geom[lev].ProbLo(1);
+        if (std::abs(ylo - axis_origin) > Set::Scalar(1.0e-14)) {
+            Util::Abort(INFO,
+                "Axisymmetric axis BC requires geometry.prob_lo[1] == geometry.axis_origin.");
+        }
+    
+        const int m1_idx    = variableIndex.M1;
+        const int m2_idx    = variableIndex.M2;
+        const int momx_idx  = variableIndex.MOMX;
+        const int momy_idx  = variableIndex.MOMY;
+        const int etot_idx  = variableIndex.ETOT;
+        const int alpha_idx = variableIndex.ALPHA;
+    
+        // -----------------------------
+        // PVec parity:
+        // even: rho1, rho2, u_x, ie, alpha
+        // odd : u_r
+        // -----------------------------
+        for (amrex::MFIter mfi(*PVec_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const amrex::Box& vbx = mfi.validbox();
+    
+            // Only boxes touching the physical axis need ylo ghost filling.
+            if (vbx.smallEnd(1) != jlo) continue;
+    
+            amrex::Box gbx = vbx;
+            gbx.grow(0, ng);              // include x ghost range already filled by x BC/periodicity
+            gbx.setSmall(1, jlo - ng);
+            gbx.setBig  (1, jlo - 1);
+    
+            auto const& p = PVec_mf.Patch(lev, mfi);
+    
+            amrex::ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                const int jm = 2*jlo - 1 - j;  // mirror index: jlo-1 -> jlo, jlo-2 -> jlo+1, ...
+    
+                p(i,j,k,m1_idx)    =  p(i,jm,k,m1_idx);
+                p(i,j,k,m2_idx)    =  p(i,jm,k,m2_idx);
+                p(i,j,k,momx_idx)  =  p(i,jm,k,momx_idx);   // axial velocity even
+                p(i,j,k,momy_idx)  = -p(i,jm,k,momy_idx);   // radial velocity odd
+                p(i,j,k,etot_idx)  =  p(i,jm,k,etot_idx);
+                p(i,j,k,alpha_idx) =  p(i,jm,k,alpha_idx);
+            });
+        }
+    
+        // -----------------------------
+        // Pressure parity: even
+        // -----------------------------
+        for (amrex::MFIter mfi(*Pressure_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const amrex::Box& vbx = mfi.validbox();
+            if (vbx.smallEnd(1) != jlo) continue;
+    
+            amrex::Box gbx = vbx;
+            gbx.grow(0, ng);
+            gbx.setSmall(1, jlo - ng);
+            gbx.setBig  (1, jlo - 1);
+    
+            auto const& p = Pressure_mf.Patch(lev, mfi);
+    
+            amrex::ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                const int jm = 2*jlo - 1 - j;
+                p(i,j,k,0) = p(i,jm,k,0);
+            });
+        }
+    
+        // -----------------------------
+        // QVec parity:
+        // even: m1, m2, rho*u_x, rho*E, alpha
+        // odd : rho*u_r
+        // -----------------------------
+        for (amrex::MFIter mfi(*QVec_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const amrex::Box& vbx = mfi.validbox();
+            if (vbx.smallEnd(1) != jlo) continue;
+    
+            amrex::Box gbx = vbx;
+            gbx.grow(0, ng);
+            gbx.setSmall(1, jlo - ng);
+            gbx.setBig  (1, jlo - 1);
+    
+            auto const& q = QVec_mf.Patch(lev, mfi);
+    
+            amrex::ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                const int jm = 2*jlo - 1 - j;
+    
+                q(i,j,k,m1_idx)    =  q(i,jm,k,m1_idx);
+                q(i,j,k,m2_idx)    =  q(i,jm,k,m2_idx);
+                q(i,j,k,momx_idx)  =  q(i,jm,k,momx_idx);   // axial momentum even
+                q(i,j,k,momy_idx)  = -q(i,jm,k,momy_idx);   // radial momentum odd
+                q(i,j,k,etot_idx)  =  q(i,jm,k,etot_idx);
+                q(i,j,k,alpha_idx) =  q(i,jm,k,alpha_idx);
+            });
+        }
+    
+        // Also keep QVec_old ghosts consistent. This is not strictly required for the
+        // current RK update, but it is safer for diagnostics or future source terms.
+        for (amrex::MFIter mfi(*QVec_old_mf[lev], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const amrex::Box& vbx = mfi.validbox();
+            if (vbx.smallEnd(1) != jlo) continue;
+    
+            amrex::Box gbx = vbx;
+            gbx.grow(0, ng);
+            gbx.setSmall(1, jlo - ng);
+            gbx.setBig  (1, jlo - 1);
+    
+            auto const& q = QVec_old_mf.Patch(lev, mfi);
+    
+            amrex::ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                const int jm = 2*jlo - 1 - j;
+    
+                q(i,j,k,m1_idx)    =  q(i,jm,k,m1_idx);
+                q(i,j,k,m2_idx)    =  q(i,jm,k,m2_idx);
+                q(i,j,k,momx_idx)  =  q(i,jm,k,momx_idx);
+                q(i,j,k,momy_idx)  = -q(i,jm,k,momy_idx);
+                q(i,j,k,etot_idx)  =  q(i,jm,k,etot_idx);
+                q(i,j,k,alpha_idx) =  q(i,jm,k,alpha_idx);
+            });
+        }
+    #endif
+    }
 void ScimitarX::ComputeAndSetNewTimeStep() {
     // Compute the minimum time step over the entire domain using GetTimeStep
     Set::Scalar finest_dt = GetTimeStep();  // GetTimeStep already accounts for the CFL number

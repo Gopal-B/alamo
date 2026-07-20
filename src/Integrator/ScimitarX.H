@@ -65,6 +65,12 @@ public:
         SolveFiveEquationModel // [DI MODIFICATION] Added 5-Eq Model
     };
 
+    enum class GeometryMode {
+        Cartesian,
+        AxisymmetricXZ   // x = axial, y = radial in 2D
+    };
+
+
     // Enum for Euler Field Variables
     enum class EulerFieldVariables {
         DENS,   // Density
@@ -379,6 +385,11 @@ protected:
     void ComputeAndSetNewTimeStep();
     void ApplyBoundaryConditions(int lev, Set::Scalar time);
 
+    // Axisymmetric x-r ghost-cell parity at the r = 0 axis.
+    // x = axial, y = radial. Only active for 2D DI5 axisymmetric runs.
+    void ApplyAxisymmetricBoundaryConditions(int lev);
+    
+
     // [DI MODIFICATION] Templates for solver specialization
     template <SolverType solverType> void ComputeConservedVariables(int lev);
     template <SolverType solverType> void UpdateSolutions(int lev);
@@ -394,6 +405,31 @@ protected:
     Set::Field<Set::Scalar> ZFlux_mf;         // Z-dir Flux Vector
     Set::Field<Set::Scalar> PVec_mf;          // Primitive variables
     Set::Field<Set::Scalar> Pressure_mf;      // Pressure variable
+    GeometryMode geometry_mode = GeometryMode::Cartesian;
+
+    // Static geometric AMR tagging.
+// Used to create a fixed refined region near the initial bubble/wall.
+// If amr.regrid_int = -1, this refined hierarchy is built initially
+// and then remains fixed.
+bool enable_static_refinement = false;
+
+Set::Scalar static_refine_center_x = 0.0;
+Set::Scalar static_refine_center_y = 0.0;
+
+Set::Scalar static_refine_radius_lev0 = -1.0; // level 0 tags -> create level 1
+Set::Scalar static_refine_radius_lev1 = -1.0; // level 1 tags -> create level 2
+Set::Scalar static_refine_radius_lev2 = -1.0; // level 2 tags -> create level 3
+
+    // For axisymmetric runs in 2D:
+    // axial_dir = 0 (x), radial_dir = 1 (y)
+    int axial_dir  = 0;
+    int radial_dir = 1;
+
+    // Physical location of axis r = 0
+    Set::Scalar axis_origin = 0.0;
+
+    // Small regularization to avoid division by zero at axis
+    Set::Scalar axisymmetric_r_epsilon_factor = 0.5;
     
     // [DI MODIFICATION] Face-centered velocity for source term
     Set::Field<Set::Scalar> UFace_mf;         // X-dir Face Velocity (u_face / S_star)
@@ -415,30 +451,23 @@ protected:
     Set::Scalar di5_pressure_floor = 1.0e-12;
     int di5_positivity_bisection_iters = 24;
 
-        // 5-equation THINC interface sharpening controls
-    // 5-equation THINC interface sharpening controls
-bool enable_di5_thinc = false;
+    bool axisymmetric_enabled = false;
+        // Kapila volume-fraction source:
+    // ∂α/∂t + u·∇α = K ∇·u
+    bool enable_kapila_k_source = false;
 
-// THINC steepness. Start gently for shock/interface tests.
-Set::Scalar di5_thinc_beta = 1.00;
+    Set::Scalar kapila_k_alpha_floor = 1.0e-10;
+    Set::Scalar kapila_k_denom_floor = 1.0e-20;
 
-// Interface-cell selection tolerance.
-// Used only to decide whether a cell is almost pure.
-Set::Scalar di5_thinc_alpha_eps = 1.0e-3;
+    // Limit K to keep (alpha + K) bounded in Cartesian form.
+    bool kapila_k_limit = true;
 
-// Face clipping/division protection tolerance.
-// Keep this much smaller than di5_thinc_alpha_eps.
-Set::Scalar di5_thinc_clip_eps = 1.0e-12;
+    // Keep this true for x-r bubble-collapse runs.
+    // It overrides the ylo ghost cells with correct even/odd parity.
+    bool axisymmetric_apply_axis_bc = true;
 
-// Minimum local alpha variation required before THINC is allowed.
-Set::Scalar di5_thinc_alpha_jump_min = 5.0e-2;
+ 
 
-// Relative pressure-jump sensor.
-// Negative disables sensor.
-Set::Scalar di5_thinc_max_pressure_jump = 5.0e-2;
-
-// Apply THINC only if alpha is locally monotone.
-bool di5_thinc_require_monotone = true;
     // Refinement threshold values
     Set::Scalar density_refinement_criterion = 0.01;
     Set::Scalar velocity_refinement_criterion = 0.01;
