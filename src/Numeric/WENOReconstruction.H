@@ -276,8 +276,8 @@ struct WENOIS5Traits {
     static Set::MultiMatrix GetSubStencilOffsets() {
         Set::MultiMatrix offsets(NumCandidateStencils, PointsPerStencil);
         offsets <<
-             0,  1,  1,   // S0 uses {i, i+1}; third entry duplicated but ignored by coeff=0
-            -1,  0,  0,   // S1 uses {i-1, i}; third entry duplicated but ignored by coeff=0
+             0,  1,  1,   // S0 uses {i, i+1};
+            -1,  0,  0,   // S1 uses {i-1, i};
              0,  1,  2,   // S2 uses {i, i+1, i+2}
             -2, -1,  0;   // S3 uses {i-2, i-1, i}
         return offsets;
@@ -446,7 +446,7 @@ public:
             // Safe indicator value to prevent division by zero
             Set::Scalar safe_indicator = std::max(indicators[r], 1.0e-15);
 
-            // WENO-JS weight computation: α₍ᵣ₎ = d₍ᵣ₎/(ε + β₍ᵣ₎)ᵖ
+            // WENO-JS weight computation
             alphas[r] = optimalWeights(r) / 
                 std::pow(safe_indicator + Traits::Epsilon, Traits::Power);
             alpha_sum += alphas[r];

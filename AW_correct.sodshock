@@ -1,7 +1,7 @@
 # ==========================================
 # Simulation Control
 # ==========================================
-plot_file = AWtest
+plot_file = AWater
 
 timestep  = 1.0e-7
 stop_time = .229e-03
@@ -12,7 +12,7 @@ max_step  = 100000
 # ==========================================
 amr.plot_int        = 200
 amr.max_level       = 0
-amr.n_cell          = 2000 4 1
+amr.n_cell          = 1500 4 1
 amr.blocking_factor = 1
 amr.regrid_int      = -1
 amr.grid_eff        = 1.0
@@ -26,12 +26,12 @@ geometry.is_periodic = 0 0 0
 # Solver Configuration
 # ==========================================
 SolverType          = SolveFiveEquationModel
-cflNumber           = 0.7
+cflNumber           = 0.6
 
 TimeSteppingScheme  = RK3
 FluxScheme          = HLLC
 FluxReconstruction  = WENO
-WenoVariant         = WENOZ5
+WenoVariant         = WENOIS5
 ReconstructionMode  = Characteristic
 
 # ==========================================
@@ -103,3 +103,13 @@ bc.pressure.val.ylo = 0.0
 bc.pressure.val.yhi = 0.0
 bc.pressure.val.zlo = 0.0
 bc.pressure.val.zhi = 0.0
+
+
+# ----------------------------------------------------------
+# DI positivity controls
+# ----------------------------------------------------------
+enable_di5_face_positivity     = 1
+di5_partial_density_floor      = 1.0e-12
+di5_alpha_floor                = 1.0e-12
+di5_pressure_floor             = 1.0e-8
+di5_positivity_bisection_iters = 24
